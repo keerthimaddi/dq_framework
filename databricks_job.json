@@ -1,0 +1,17 @@
+{
+  "name": "campaign-dq-framework-daily",
+  "tasks": [
+    {
+      "task_key": "run_dqx_pipeline",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Repos/<USER>/<REPO>/notebooks/run_dqx_pipeline.py"
+      },
+      "job_cluster_key": "serverless"
+    }
+  ],
+  "schedule": {
+    "quartz_cron_expression": "0 0 6 * * ?",
+    "timezone_id": "Asia/Kolkata",
+    "pause_status": "UNPAUSED"
+  }
+}

@@ -1,0 +1,231 @@
+
+framework:
+  name: Campaign Data Quality Framework
+  catalog: wmg
+  excluded_schemas:
+    - information_schema
+  bronze_schema: dqx_bronze
+  silver_schema: dqx_silver
+  gold_schema: dqx_gold
+  audit_schema: dqx_audit
+  quarantine_schema: dqx_quarantine
+  candidate_schema: dqx_profiling
+  default_freshness_hours: 24
+  volume_default_variance_pct: 15
+
+overall_thresholds:
+  pass: 90
+  warning: 75
+  fail: 0
+
+scoring:
+  pass_factor: 1.0
+  warning_factor: 0.5
+  fail_factor: 0.0
+
+dq_rules:
+  - id: DQ01
+    dimension: completeness
+    level: column
+    enabled: true
+    default_weight: 10
+    severity: high
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ02
+    dimension: accuracy
+    level: row
+    enabled: true
+    default_weight: 10
+    severity: high
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ03
+    dimension: validity
+    level: column
+    enabled: true
+    default_weight: 8
+    severity: high
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ04
+    dimension: uniqueness
+    level: dataset
+    enabled: true
+    default_weight: 8
+    severity: critical
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ05
+    dimension: consistency
+    level: row
+    enabled: true
+    default_weight: 7
+    severity: medium
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ06
+    dimension: integrity
+    level: cross_table
+    enabled: true
+    default_weight: 7
+    severity: critical
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ07
+    dimension: timeliness
+    level: dataset
+    enabled: true
+    default_weight: 6
+    severity: high
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ08
+    dimension: conformity
+    level: column
+    enabled: true
+    default_weight: 5
+    severity: medium
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ09
+    dimension: range
+    level: row
+    enabled: true
+    default_weight: 5
+    severity: high
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ10
+    dimension: duplicate
+    level: dataset
+    enabled: true
+    default_weight: 7
+    severity: high
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ11
+    dimension: null
+    level: column
+    enabled: true
+    default_weight: 8
+    severity: high
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ12
+    dimension: length
+    level: column
+    enabled: true
+    default_weight: 4
+    severity: medium
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ13
+    dimension: data_type
+    level: column
+    enabled: true
+    default_weight: 5
+    severity: high
+    threshold: {pass: 0, warning: 5, fail: 10}
+  - id: DQ14
+    dimension: pattern
+    level: column
+    enabled: true
+    default_weight: 4
+    severity: medium
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ15
+    dimension: business_rule
+    level: row
+    enabled: true
+    default_weight: 5
+    severity: critical
+    threshold: {pass: 0, warning: 1, fail: 5}
+  - id: DQ16
+    dimension: volume
+    level: dataset
+    enabled: true
+    default_weight: 1
+    severity: medium
+    threshold: {pass: 0, warning: 15, fail: 30}
+
+# Business-specific configuration is deliberately kept in YAML.
+# Add more table/column rules here as the data owner approves them.
+table_rules:
+  wmg.default.customers_100:
+    unique_keys: [customer_id]
+    mandatory_columns: [customer_id]
+    expected_types:
+      customer_id: string
+    range_rules: {}
+    pattern_rules: {}
+    length_rules: {}
+    allowed_values: {}
+    row_expressions: {}
+    date_columns: []
+
+  wmg.demo.transactions:
+    unique_keys: [transaction_id]
+    mandatory_columns: [transaction_id, customer_id]
+    expected_types:
+      transaction_id: string
+      customer_id: string
+    range_rules: {}
+    pattern_rules: {}
+    length_rules: {}
+    allowed_values: {}
+    row_expressions: {}
+    date_columns: [transaction_date]
+
+  wmg.default.databricks:
+    unique_keys: []
+    mandatory_columns: []
+    expected_types: {}
+    range_rules: {}
+    pattern_rules: {}
+    length_rules: {}
+    allowed_values: {}
+    row_expressions: {}
+    date_columns: []
+
+  wmg.demo.emea_and_global_data_combined_2_1:
+    unique_keys: []
+    mandatory_columns: []
+    expected_types: {}
+    range_rules: {}
+    pattern_rules: {}
+    length_rules: {}
+    allowed_values: {}
+    row_expressions: {}
+    date_columns: []
+
+relationships:
+  - name: transactions_customer_fk
+    child_table: wmg.demo.transactions
+    child_column: customer_id
+    parent_table: wmg.default.customers_100
+    parent_column: customer_id
+    nullable_allowed: false
+
+profiling:
+  enabled: true
+  top_values: 10
+  candidate_null_rate_pct: 1
+  candidate_range_multiplier: 1.25
+  candidate_string_length_percentile: 99
+
+ml_weighting:
+  enabled: true
+  incident_table: null
+  feature_columns:
+    - incident_count
+    - avg_mttd_minutes
+    - avg_mtta_minutes
+    - avg_mttr_minutes
+    - aidr_pct
+    - severity_score
+  target_column: total_rev_impact
+  output_table: dqx_audit.dynamic_dq_weights
+  write_yaml: false
+
+reingestion:
+  enabled: true
+  corrected_table_suffix: "_corrected"
+
+# Tables used for persistent framework outputs.
+output_tables:
+  audit: dq_audit_results
+  summary: dq_summary
+  quarantine: dq_quarantine
+  profiling: dq_profile
+  candidates: dq_rule_candidates
+  kpi: dq_kpis
+  weights: dq_dynamic_weights
