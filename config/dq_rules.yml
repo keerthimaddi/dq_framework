@@ -95,7 +95,7 @@ dq_rules:
     severity: high
     threshold: {pass: 0, warning: 1, fail: 5}
   - id: DQ11
-    dimension: null
+    dimension: "null"
     level: column
     enabled: true
     default_weight: 8
