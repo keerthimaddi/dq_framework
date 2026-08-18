@@ -1,210 +1,377 @@
-
 framework:
   name: Campaign Data Quality Framework
   catalog: wmg
+
   excluded_schemas:
     - information_schema
+    - dqx_bronze
+    - dqx_silver
+    - dqx_gold
+    - dqx_audit
+    - dqx_quarantine
+    - dqx_profiling
+
   bronze_schema: dqx_bronze
   silver_schema: dqx_silver
   gold_schema: dqx_gold
   audit_schema: dqx_audit
   quarantine_schema: dqx_quarantine
   candidate_schema: dqx_profiling
+
+  source_schema_allowlist:
+    - demo
+
   default_freshness_hours: 24
-  volume_default_variance_pct: 15
+  volume_default_variance_pct: 30
+
 
 overall_thresholds:
   pass: 90
   warning: 75
   fail: 0
 
-scoring:
-  pass_factor: 1.0
-  warning_factor: 0.5
-  fail_factor: 0.0
+
+quality_gate:
+  enabled: true
+  silver_min_score: 90
+
 
 dq_rules:
+
   - id: DQ01
     dimension: completeness
     level: column
     enabled: true
     default_weight: 10
     severity: high
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ02
     dimension: accuracy
     level: row
     enabled: true
     default_weight: 10
     severity: high
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ03
     dimension: validity
     level: column
     enabled: true
     default_weight: 8
     severity: high
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ04
     dimension: uniqueness
     level: dataset
     enabled: true
     default_weight: 8
     severity: critical
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ05
     dimension: consistency
     level: row
     enabled: true
     default_weight: 7
     severity: medium
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ06
     dimension: integrity
     level: cross_table
     enabled: true
     default_weight: 7
     severity: critical
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ07
     dimension: timeliness
     level: dataset
     enabled: true
     default_weight: 6
     severity: high
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ08
     dimension: conformity
     level: column
     enabled: true
     default_weight: 5
     severity: medium
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ09
     dimension: range
     level: row
     enabled: true
     default_weight: 5
     severity: high
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ10
     dimension: duplicate
     level: dataset
     enabled: true
     default_weight: 7
     severity: high
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ11
-    dimension: "null"
+    dimension: null
     level: column
     enabled: true
     default_weight: 8
     severity: high
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ12
     dimension: length
     level: column
     enabled: true
     default_weight: 4
     severity: medium
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ13
     dimension: data_type
     level: column
     enabled: true
     default_weight: 5
     severity: high
-    threshold: {pass: 0, warning: 5, fail: 10}
+
   - id: DQ14
     dimension: pattern
     level: column
     enabled: true
     default_weight: 4
     severity: medium
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ15
     dimension: business_rule
     level: row
     enabled: true
     default_weight: 5
     severity: critical
-    threshold: {pass: 0, warning: 1, fail: 5}
+
   - id: DQ16
     dimension: volume
     level: dataset
     enabled: true
     default_weight: 1
     severity: medium
-    threshold: {pass: 0, warning: 15, fail: 30}
 
-# Business-specific configuration is deliberately kept in YAML.
-# Add more table/column rules here as the data owner approves them.
+
 table_rules:
-  wmg.default.customers_100:
-    unique_keys: [customer_id]
-    mandatory_columns: [customer_id]
+
+  wmg.demo.campaign_data:
+
+    unique_keys:
+      - record_id
+
+    mandatory_columns:
+      - record_id
+      - campaign_name
+      - ad_set_name
+      - amount_spent_usd
+      - age_group
+      - creative_type
+      - event_date
+      - incident
+
+    null_columns:
+      - record_id
+      - campaign_name
+      - ad_set_name
+      - amount_spent_usd
+      - age_group
+      - creative_type
+      - event_date
+      - incident
+
     expected_types:
-      customer_id: string
-    range_rules: {}
-    pattern_rules: {}
-    length_rules: {}
-    allowed_values: {}
-    row_expressions: {}
-    date_columns: []
+      record_id: string
+      campaign_id: string
+      campaign_name: string
+      ad_set_name: string
+      amount_spent_usd: double
+      age_group: string
+      creative_type: string
+      event_date: date
+      incident: string
+      rev_impact: double
+      ds: string
+      label_code: string
+      kpi: string
+      include_count: int
 
-  wmg.demo.transactions:
-    unique_keys: [transaction_id]
-    mandatory_columns: [transaction_id, customer_id]
+    allowed_values:
+
+      age_group:
+        - 18-24
+        - 25-34
+        - 35-44
+        - 45-54
+        - 55+
+
+      creative_type:
+        - Video
+        - Display
+        - Carousel
+        - Static
+        - HTML5
+
+      ds:
+        - DV360
+        - Meta
+        - Google
+        - TTD
+
+      include_count:
+        - 0
+        - 1
+
+    range_rules:
+
+      amount_spent_usd:
+        min: 0
+
+      rev_impact:
+        min: 0
+
+      include_count:
+        min: 0
+        max: 1
+
+    length_rules:
+
+      campaign_name:
+        min: 3
+        max: 120
+
+      ad_set_name:
+        min: 3
+        max: 120
+
+      incident:
+        max: 200
+
+    pattern_rules:
+
+      record_id: '^CAMP_[0-9]{4}$'
+      campaign_id: '^CMP_[0-9]{3}$'
+      label_code: '^L[0-9]{2}$'
+
+    conformity_rules:
+
+      amount_spent_usd: 'amount_spent_usd >= 0'
+      rev_impact: 'rev_impact >= 0'
+
+    row_expressions:
+
+      spend_non_negative: 'amount_spent_usd >= 0'
+      impact_non_negative: 'rev_impact >= 0'
+
+    consistency_rules:
+
+      include_is_binary: 'include_count IN (0,1)'
+
+    business_rules:
+
+      include_incident_logic: '((include_count = 1) OR (include_count = 0))'
+
+    date_columns:
+      - event_date
+
+
+  wmg.demo.campaign_master:
+
+    unique_keys:
+      - campaign_id
+
+    mandatory_columns:
+      - campaign_id
+      - campaign_name
+
+    null_columns:
+      - campaign_id
+      - campaign_name
+
     expected_types:
-      transaction_id: string
-      customer_id: string
-    range_rules: {}
-    pattern_rules: {}
-    length_rules: {}
-    allowed_values: {}
-    row_expressions: {}
-    date_columns: [transaction_date]
+      campaign_id: string
+      campaign_name: string
 
-  wmg.default.databricks:
-    unique_keys: []
-    mandatory_columns: []
-    expected_types: {}
-    range_rules: {}
-    pattern_rules: {}
-    length_rules: {}
+    pattern_rules:
+      campaign_id: '^CMP_[0-9]{3}$'
+
+    length_rules:
+      campaign_name:
+        min: 3
+        max: 120
+
     allowed_values: {}
+    range_rules: {}
+    conformity_rules: {}
     row_expressions: {}
+    consistency_rules: {}
+    business_rules: {}
     date_columns: []
 
-  wmg.demo.emea_and_global_data_combined_2_1:
+
+  wmg.demo.incident_history:
+
     unique_keys: []
-    mandatory_columns: []
-    expected_types: {}
+
+    mandatory_columns:
+      - incident_count
+      - avg_mttd_minutes
+      - avg_mtta_minutes
+      - avg_mttr_minutes
+      - aidr_pct
+      - severity_score
+      - total_rev_impact
+
+    null_columns:
+      - incident_count
+      - avg_mttd_minutes
+      - avg_mtta_minutes
+      - avg_mttr_minutes
+      - aidr_pct
+      - severity_score
+      - total_rev_impact
+
+    expected_types:
+      incident_count: int
+      avg_mttd_minutes: double
+      avg_mtta_minutes: double
+      avg_mttr_minutes: double
+      aidr_pct: double
+      severity_score: double
+      total_rev_impact: double
+
+    allowed_values: {}
     range_rules: {}
     pattern_rules: {}
     length_rules: {}
-    allowed_values: {}
+    conformity_rules: {}
     row_expressions: {}
+    consistency_rules: {}
+    business_rules: {}
     date_columns: []
+
 
 relationships:
-  - name: transactions_customer_fk
-    child_table: wmg.demo.transactions
-    child_column: customer_id
-    parent_table: wmg.default.customers_100
-    parent_column: customer_id
+
+  - name: campaign_master_fk
+    child_table: wmg.demo.campaign_data
+    child_column: campaign_id
+    parent_table: wmg.demo.campaign_master
+    parent_column: campaign_id
     nullable_allowed: false
 
+
 profiling:
+
   enabled: true
   top_values: 10
   candidate_null_rate_pct: 1
-  candidate_range_multiplier: 1.25
-  candidate_string_length_percentile: 99
+
 
 ml_weighting:
+
   enabled: true
-  incident_table: null
+
+  incident_table: wmg.demo.incident_history
+
   feature_columns:
     - incident_count
     - avg_mttd_minutes
@@ -212,16 +379,16 @@ ml_weighting:
     - avg_mttr_minutes
     - aidr_pct
     - severity_score
+
   target_column: total_rev_impact
-  output_table: dqx_audit.dynamic_dq_weights
-  write_yaml: false
 
-reingestion:
-  enabled: true
-  corrected_table_suffix: "_corrected"
+  output_table: wmg.dqx_audit.dq_dynamic_weights
 
-# Tables used for persistent framework outputs.
+  min_training_rows: 10
+
+
 output_tables:
+
   audit: dq_audit_results
   summary: dq_summary
   quarantine: dq_quarantine
@@ -229,3 +396,4 @@ output_tables:
   candidates: dq_rule_candidates
   kpi: dq_kpis
   weights: dq_dynamic_weights
+  pipeline_runs: dq_pipeline_runs
