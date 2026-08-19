@@ -1,291 +1,472 @@
+# ============================================================
+# LAKEHOUSE
+# ============================================================
+
+import re
+
 from pyspark.sql import functions as F
 
 
-def ensure_schemas(spark, catalog, framework_cfg):
-    """
-    Create all framework schemas in the configured Unity Catalog.
+def quote_identifier(identifier):
 
-    framework_cfg is the contents of the YAML 'framework' section.
-    """
+    return (
+        "`"
+        + str(identifier).replace("`", "``")
+        + "`"
+    )
 
-    schema_keys = [
-        "bronze_schema",
-        "silver_schema",
-        "gold_schema",
-        "audit_schema",
-        "quarantine_schema",
-        "candidate_schema",
-    ]
 
-    for key in schema_keys:
+def full_table_name(
+    catalog,
+    schema,
+    table
+):
 
-        schema = framework_cfg.get(key)
+    return (
+        f"{quote_identifier(catalog)}."
+        f"{quote_identifier(schema)}."
+        f"{quote_identifier(table)}"
+    )
 
-        if not schema:
-            raise ValueError(
-                f"Missing framework schema configuration: {key}"
+
+def safe_column_name(name):
+
+    name = str(name).strip()
+
+    name = re.sub(
+        r"[^A-Za-z0-9_]",
+        "_",
+        name
+    )
+
+    name = re.sub(
+        r"_+",
+        "_",
+        name
+    )
+
+    name = name.strip("_")
+
+    if not name:
+        name = "column"
+
+    if name[0].isdigit():
+        name = "_" + name
+
+    return name.lower()
+
+
+def normalize_columns(df):
+
+    used = set()
+    mapping = {}
+
+    for original in df.columns:
+
+        base = safe_column_name(
+            original
+        )
+
+        candidate = base
+        counter = 1
+
+        while candidate in used:
+
+            candidate = (
+                f"{base}_{counter}"
             )
 
+            counter += 1
+
+        used.add(candidate)
+
+        mapping[original] = candidate
+
+    for original, safe in mapping.items():
+
+        if original != safe:
+
+            df = df.withColumnRenamed(
+                original,
+                safe
+            )
+
+    return df, mapping
+
+
+def read_source_table(
+    spark,
+    catalog,
+    schema,
+    table
+):
+
+    return spark.table(
+        full_table_name(
+            catalog,
+            schema,
+            table
+        )
+    )
+
+
+def create_framework_schemas(
+    spark,
+    cfg
+):
+
+    framework = cfg["framework"]
+
+    catalog = framework["catalog"]
+
+    schemas = [
+        framework["bronze_schema"],
+        framework["silver_schema"],
+        framework["gold_schema"],
+        framework["audit_schema"],
+        framework["quarantine_schema"],
+        framework["candidate_schema"],
+    ]
+
+    for schema in schemas:
+
         print(
-            f"Creating/checking schema: "
+            f"Checking schema: "
             f"{catalog}.{schema}"
         )
 
         spark.sql(
             f"CREATE SCHEMA IF NOT EXISTS "
-            f"`{catalog}`.`{schema}`"
+            f"{quote_identifier(catalog)}."
+            f"{quote_identifier(schema)}"
         )
 
 
 def write_bronze(
     spark,
-    source_full_name,
-    target_full_name
+    df,
+    catalog,
+    schema,
+    table,
+    cfg
 ):
-    """
-    Copy source Unity Catalog table into Bronze
-    and add DQ ingestion metadata.
-    """
 
-    source_parts = source_full_name.split(".")
-    target_parts = target_full_name.split(".")
-
-    source = (
-        f"`{source_parts[0]}`."
-        f"`{source_parts[1]}`."
-        f"`{source_parts[2]}`"
-    )
-
-    target = (
-        f"`{target_parts[0]}`."
-        f"`{target_parts[1]}`."
-        f"`{target_parts[2]}`"
-    )
-
-    df = spark.table(source)
-
-    bronze_df = (
+    safe_df, mapping = normalize_columns(
         df
+    )
+
+    bronze_schema = cfg[
+        "framework"
+    ][
+        "bronze_schema"
+    ]
+
+    bronze_table = (
+        f"{catalog}."
+        f"{bronze_schema}."
+        f"{table}"
+    )
+
+    print(
+        f"Writing Bronze: "
+        f"{bronze_table}"
+    )
+
+    safe_df = (
+        safe_df
         .withColumn(
-            "_dqx_ingestion_timestamp",
+            "_dq_ingestion_timestamp",
             F.current_timestamp()
         )
         .withColumn(
-            "_dqx_source_table",
-            F.lit(source_full_name)
+            "_dq_source_catalog",
+            F.lit(catalog)
+        )
+        .withColumn(
+            "_dq_source_schema",
+            F.lit(schema)
+        )
+        .withColumn(
+            "_dq_source_table",
+            F.lit(table)
         )
     )
 
     (
-        bronze_df.write
+        safe_df.write
         .format("delta")
         .mode("overwrite")
         .option(
             "overwriteSchema",
             "true"
         )
-        .saveAsTable(target)
+        .saveAsTable(
+            full_table_name(
+                catalog,
+                bronze_schema,
+                table
+            )
+        )
     )
 
-    return bronze_df
+    return safe_df, mapping
 
 
-def quarantine_rows(
+def create_silver(
     spark,
-    df,
-    failed_keys,
-    source_full_name,
-    failed_rule,
-    run_id,
-    reason,
-    target_full_name
+    bronze_df,
+    catalog,
+    table,
+    cfg,
+    score
 ):
-    """
-    Write failed records to the quarantine table.
-    """
 
-    if not failed_keys:
-        return 0
-
-    if not failed_keys[0]:
-        return 0
-
-    keys = list(failed_keys[0].keys())
-
-    key_df = spark.createDataFrame(
-        failed_keys
+    gate = cfg.get(
+        "quality_gate",
+        {}
     )
 
-    bad = df.join(
-        key_df,
-        keys,
-        "inner"
+    minimum_score = float(
+        gate.get(
+            "silver_min_score",
+            90
+        )
     )
 
-    source_parts = source_full_name.split(".")
+    silver_schema = cfg[
+        "framework"
+    ][
+        "silver_schema"
+    ]
 
-    quarantine_df = (
-        bad
+    silver_table = (
+        f"{catalog}."
+        f"{silver_schema}."
+        f"{table}"
+    )
+
+    if (
+        gate.get("enabled", True)
+        and score < minimum_score
+    ):
+
+        print(
+            f"Silver BLOCKED | "
+            f"Score={score} | "
+            f"Required={minimum_score}"
+        )
+
+        return False
+
+    metadata_columns = [
+        "_dq_ingestion_timestamp",
+        "_dq_source_catalog",
+        "_dq_source_schema",
+        "_dq_source_table",
+    ]
+
+    columns_to_drop = [
+        column
+        for column in metadata_columns
+        if column in bronze_df.columns
+    ]
+
+    silver_df = bronze_df.drop(
+        *columns_to_drop
+    )
+
+    (
+        silver_df.write
+        .format("delta")
+        .mode("overwrite")
+        .option(
+            "overwriteSchema",
+            "true"
+        )
+        .saveAsTable(
+            full_table_name(
+                catalog,
+                silver_schema,
+                table
+            )
+        )
+    )
+
+    print(
+        f"Silver CREATED: "
+        f"{silver_table}"
+    )
+
+    return True
+
+
+def create_gold(
+    spark,
+    catalog,
+    table,
+    cfg,
+    score,
+    status
+):
+
+    silver_schema = cfg[
+        "framework"
+    ][
+        "silver_schema"
+    ]
+
+    gold_schema = cfg[
+        "framework"
+    ][
+        "gold_schema"
+    ]
+
+    silver_table = (
+        f"{catalog}."
+        f"{silver_schema}."
+        f"{table}"
+    )
+
+    gold_table = (
+        f"{catalog}."
+        f"{gold_schema}."
+        f"{table}"
+    )
+
+    if not spark.catalog.tableExists(
+        silver_table
+    ):
+
+        print(
+            f"Silver does not exist: "
+            f"{silver_table}"
+        )
+
+        return False
+
+    df = spark.table(
+        full_table_name(
+            catalog,
+            silver_schema,
+            table
+        )
+    )
+
+    gold_df = (
+        df
         .withColumn(
-            "_dqx_catalog",
-            F.lit(source_parts[0])
+            "_dq_quality_score",
+            F.lit(float(score))
         )
         .withColumn(
-            "_dqx_schema",
-            F.lit(source_parts[1])
+            "_dq_overall_status",
+            F.lit(status)
         )
         .withColumn(
-            "_dqx_table",
-            F.lit(source_parts[2])
-        )
-        .withColumn(
-            "_dqx_failed_rule",
-            F.lit(failed_rule)
-        )
-        .withColumn(
-            "_dqx_failure_reason",
-            F.lit(reason)
-        )
-        .withColumn(
-            "_dqx_pipeline_run_id",
-            F.lit(run_id)
-        )
-        .withColumn(
-            "_dqx_detected_timestamp",
+            "_dq_gold_timestamp",
             F.current_timestamp()
         )
     )
 
-    target_parts = target_full_name.split(".")
-
-    target = (
-        f"`{target_parts[0]}`."
-        f"`{target_parts[1]}`."
-        f"`{target_parts[2]}`"
+    (
+        gold_df.write
+        .format("delta")
+        .mode("overwrite")
+        .option(
+            "overwriteSchema",
+            "true"
+        )
+        .saveAsTable(
+            full_table_name(
+                catalog,
+                gold_schema,
+                table
+            )
+        )
     )
+
+    print(
+        f"Gold CREATED: "
+        f"{gold_table}"
+    )
+
+    return True
+
+
+def create_quarantine(
+    spark,
+    df,
+    condition,
+    catalog,
+    schema,
+    table,
+    cfg,
+    run_id
+):
+
+    if condition is None:
+
+        print(
+            "Quarantined rows: 0"
+        )
+
+        return 0
+
+    quarantine_schema = cfg[
+        "framework"
+    ][
+        "quarantine_schema"
+    ]
+
+    quarantine_table_name = (
+        f"quarantine_"
+        f"{safe_column_name(table)}"
+    )
+
+    quarantine_df = (
+        df
+        .filter(condition)
+        .withColumn(
+            "_dq_run_id",
+            F.lit(run_id)
+        )
+        .withColumn(
+            "_dq_source_table",
+            F.lit(
+                f"{catalog}.{schema}.{table}"
+            )
+        )
+        .withColumn(
+            "_dq_quarantine_timestamp",
+            F.current_timestamp()
+        )
+    )
+
+    count = quarantine_df.count()
+
+    if count == 0:
+
+        print(
+            "Quarantined rows: 0"
+        )
+
+        return 0
 
     (
         quarantine_df.write
         .format("delta")
         .mode("append")
-        .option(
-            "mergeSchema",
-            "true"
-        )
-        .saveAsTable(target)
-    )
-
-    return quarantine_df.count()
-
-
-def build_silver(
-    spark,
-    bronze_full_name,
-    quarantine_full_name,
-    target_full_name,
-    key_columns
-):
-    """
-    Build Silver from Bronze.
-
-    Current generic implementation:
-    - Deduplicate using configured unique keys
-    - Otherwise deduplicate complete records
-    """
-
-    bronze_parts = bronze_full_name.split(".")
-
-    bronze_table = (
-        f"`{bronze_parts[0]}`."
-        f"`{bronze_parts[1]}`."
-        f"`{bronze_parts[2]}`"
-    )
-
-    bronze = spark.table(
-        bronze_table
-    )
-
-    if key_columns:
-
-        valid_keys = [
-            key
-            for key in key_columns
-            if key in bronze.columns
-        ]
-
-        if valid_keys:
-            clean = bronze.dropDuplicates(
-                valid_keys
+        .saveAsTable(
+            full_table_name(
+                catalog,
+                quarantine_schema,
+                quarantine_table_name
             )
-        else:
-            clean = bronze.dropDuplicates()
-
-    else:
-        clean = bronze.dropDuplicates()
-
-    target_parts = target_full_name.split(".")
-
-    target = (
-        f"`{target_parts[0]}`."
-        f"`{target_parts[1]}`."
-        f"`{target_parts[2]}`"
-    )
-
-    (
-        clean.write
-        .format("delta")
-        .mode("overwrite")
-        .option(
-            "overwriteSchema",
-            "true"
         )
-        .saveAsTable(target)
     )
 
-    return clean
-
-
-def build_gold(
-    spark,
-    silver_full_name,
-    target_full_name
-):
-    """
-    Build Gold from Silver.
-
-    Generic implementation currently preserves
-    the validated Silver dataset.
-    """
-
-    silver_parts = silver_full_name.split(".")
-
-    silver_table = (
-        f"`{silver_parts[0]}`."
-        f"`{silver_parts[1]}`."
-        f"`{silver_parts[2]}`"
+    print(
+        f"Quarantined rows: {count}"
     )
 
-    df = spark.table(
-        silver_table
-    )
-
-    target_parts = target_full_name.split(".")
-
-    target = (
-        f"`{target_parts[0]}`."
-        f"`{target_parts[1]}`."
-        f"`{target_parts[2]}`"
-    )
-
-    (
-        df.write
-        .format("delta")
-        .mode("overwrite")
-        .option(
-            "overwriteSchema",
-            "true"
-        )
-        .saveAsTable(target)
-    )
-
-    return df
+    return count

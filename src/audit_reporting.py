@@ -1,61 +1,187 @@
+# ============================================================
+# AUDIT REPORTING
+# ============================================================
 
-from pyspark.sql import functions as F
 from datetime import datetime
 
-def persist_results(spark, cfg, results, details, kpis, catalog):
-    audit_schema = cfg["framework"]["audit_schema"]
-    q_schema = cfg["framework"]["quarantine_schema"]
-    cand_schema = cfg["framework"]["candidate_schema"]
-    summary_table = f"`{catalog}`.`{audit_schema}`.`{cfg['output_tables']['summary']}`"
-    audit_table = f"`{catalog}`.`{audit_schema}`.`{cfg['output_tables']['audit']}`"
-    kpi_table = f"`{catalog}`.`{audit_schema}`.`{cfg['output_tables']['kpi']}`"
+from pyspark.sql import functions as F
 
-    if details:
-        spark.createDataFrame(details).write.format("delta").mode("append").option("mergeSchema","true").saveAsTable(audit_table)
 
-    if results:
-        spark.createDataFrame(results).write.format("delta").mode("append").option("mergeSchema","true").saveAsTable(summary_table)
+def quote_identifier(identifier):
 
-    if kpis:
-        spark.createDataFrame(kpis).write.format("delta").mode("append").option("mergeSchema","true").saveAsTable(kpi_table)
+    return (
+        "`"
+        + str(identifier).replace("`", "``")
+        + "`"
+    )
 
-def make_kpis(result):
-    out = []
-    ts = result["run_timestamp"]
-    out.append({
-        "run_id": result["run_id"], "run_timestamp": ts,
-        "catalog": result["catalog"], "schema": result["schema"], "table": result["table"],
-        "layer": "DQ", "kpi": "Null Rate",
-        "value": next((d["failure_percentage"] for d in result["details"] if d["dq_check"]=="DQ11"), 0.0)
-    })
-    out.append({
-        "run_id": result["run_id"], "run_timestamp": ts,
-        "catalog": result["catalog"], "schema": result["schema"], "table": result["table"],
-        "layer": "DQ", "kpi": "Duplicate Key Rate",
-        "value": next((d["failure_percentage"] for d in result["details"] if d["dq_check"]=="DQ04"), 0.0)
-    })
-    out.append({
-        "run_id": result["run_id"], "run_timestamp": ts,
-        "catalog": result["catalog"], "schema": result["schema"], "table": result["table"],
-        "layer": "DQ", "kpi": "Data Latency",
-        "value": next((d["failure_percentage"] for d in result["details"] if d["dq_check"]=="DQ07"), 0.0)
-    })
-    return out
 
-def create_reporting_views(spark, catalog, cfg):
-    schema = cfg["framework"]["audit_schema"]
-    summary = cfg["output_tables"]["summary"]
-    audit = cfg["output_tables"]["audit"]
-    kpi = cfg["output_tables"]["kpi"]
-    spark.sql(f"""
-      CREATE OR REPLACE VIEW `{catalog}`.`{schema}`.v_dq_final_report AS
-      SELECT * FROM `{catalog}`.`{schema}`.`{summary}`
-    """)
-    spark.sql(f"""
-      CREATE OR REPLACE VIEW `{catalog}`.`{schema}`.v_dq_history AS
-      SELECT * FROM `{catalog}`.`{schema}`.`{audit}`
-    """)
-    spark.sql(f"""
-      CREATE OR REPLACE VIEW `{catalog}`.`{schema}`.v_dq_kpis AS
-      SELECT * FROM `{catalog}`.`{schema}`.`{kpi}`
-    """)
+def table_name(
+    catalog,
+    schema,
+    table
+):
+
+    return (
+        f"{quote_identifier(catalog)}."
+        f"{quote_identifier(schema)}."
+        f"{quote_identifier(table)}"
+    )
+
+
+def write_audit(
+    spark,
+    cfg,
+    summary_rows,
+    detail_rows,
+    profile_rows
+):
+
+    catalog = cfg[
+        "framework"
+    ][
+        "catalog"
+    ]
+
+    audit_schema = cfg[
+        "framework"
+    ][
+        "audit_schema"
+    ]
+
+    profiling_schema = cfg[
+        "framework"
+    ][
+        "candidate_schema"
+    ]
+
+    output_tables = cfg[
+        "output_tables"
+    ]
+
+    if summary_rows:
+
+        summary_df = spark.createDataFrame(
+            summary_rows
+        )
+
+        (
+            summary_df.write
+            .format("delta")
+            .mode("append")
+            .saveAsTable(
+                table_name(
+                    catalog,
+                    audit_schema,
+                    output_tables[
+                        "summary"
+                    ]
+                )
+            )
+        )
+
+    if detail_rows:
+
+        detail_df = spark.createDataFrame(
+            detail_rows
+        )
+
+        (
+            detail_df.write
+            .format("delta")
+            .mode("append")
+            .saveAsTable(
+                table_name(
+                    catalog,
+                    audit_schema,
+                    output_tables[
+                        "audit"
+                    ]
+                )
+            )
+        )
+
+    if profile_rows:
+
+        profile_df = spark.createDataFrame(
+            profile_rows
+        )
+
+        (
+            profile_df.write
+            .format("delta")
+            .mode("overwrite")
+            .option(
+                "overwriteSchema",
+                "true"
+            )
+            .saveAsTable(
+                table_name(
+                    catalog,
+                    profiling_schema,
+                    output_tables[
+                        "profiling"
+                    ]
+                )
+            )
+        )
+
+
+def print_final_report(
+    spark,
+    cfg
+):
+
+    catalog = cfg[
+        "framework"
+    ][
+        "catalog"
+    ]
+
+    audit_schema = cfg[
+        "framework"
+    ][
+        "audit_schema"
+    ]
+
+    summary_table = (
+        f"{catalog}."
+        f"{audit_schema}."
+        f"{cfg['output_tables']['summary']}"
+    )
+
+    print()
+    print("=" * 60)
+    print("FINAL DATA QUALITY REPORT")
+    print("=" * 60)
+
+    if not spark.catalog.tableExists(
+        summary_table
+    ):
+
+        print(
+            "No summary table found."
+        )
+
+        return
+
+    df = (
+        spark.table(
+            summary_table
+        )
+        .orderBy(
+            F.col(
+                "run_timestamp"
+            ).desc()
+        )
+    )
+
+    df.show(
+        100,
+        truncate=False
+    )
+
+    print()
+    print(
+        f"Summary: {summary_table}"
+    )
