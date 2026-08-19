@@ -609,7 +609,7 @@ print(
 
 print(
     f"{CATALOG}.{SCHEMA}.incident_history"
-)
+)###
 
 print()
 print("CAMPAIGN DATA")
