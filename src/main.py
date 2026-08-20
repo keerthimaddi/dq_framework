@@ -3,22 +3,12 @@
 # MAIN PIPELINE
 # ============================================================
 
-import traceback
-import uuid
 from datetime import datetime
 
 from pyspark.sql import SparkSession
 
 from src.rule_loader import load_config
 from src.metadata_discovery import discover_tables
-from src.lakehouse import (
-    create_framework_schemas,
-    read_source_table,
-    write_bronze,
-    create_silver,
-    create_gold,
-    create_quarantine,
-)
 from src.dq_engine import (
     run_all_dq,
     calculate_score,
@@ -34,727 +24,534 @@ from src.audit_reporting import (
 )
 
 
-DQ_IDS = [
-    f"DQ{i:02d}"
-    for i in range(1, 17)
-]
+# ============================================================
+# SPARK SESSION
+# ============================================================
 
-
-def print_configuration(cfg):
-
-    print()
-    print("=" * 60)
-    print("CAMPAIGN DATA QUALITY FRAMEWORK")
-    print("=" * 60)
-
-    print(
-        f"Catalog: "
-        f"{cfg['framework']['catalog']}"
-    )
-
-    print()
-    print("=" * 60)
-    print("DQ RULE CONFIGURATION")
-    print("=" * 60)
-
-    for rule in cfg["dq_rules"]:
-
-        print(
-            f"{rule['id']} | "
-            f"{rule['dimension']} | "
-            f"Level: {rule['level']} | "
-            f"Enabled: "
-            f"{rule.get('enabled', True)} | "
-            f"Weight: "
-            f"{rule['default_weight']} | "
-            f"Severity: "
-            f"{rule['severity']}"
-        )
-
-    enabled_rules = [
-        rule
-        for rule in cfg["dq_rules"]
-        if rule.get(
-            "enabled",
-            True
-        )
-    ]
-
-    total_weight = sum(
-        float(rule["default_weight"])
-        for rule in enabled_rules
-    )
-
-    print()
-    print(
-        f"Total DQ Rules   : "
-        f"{len(cfg['dq_rules'])}"
-    )
-
-    print(
-        f"Enabled DQ Rules : "
-        f"{len(enabled_rules)}"
-    )
-
-    print(
-        f"Total Weight     : "
-        f"{total_weight}"
-    )
-
-    thresholds = cfg[
-        "overall_thresholds"
-    ]
-
-    print()
-    print(
-        f"PASS    >= {thresholds['pass']}"
-    )
-
-    print(
-        f"WARNING >= {thresholds['warning']}"
-    )
-
-    print(
-        f"FAIL    < {thresholds['warning']}"
-    )
-
-    gate = cfg[
-        "quality_gate"
-    ]
-
-    print()
-    print(
-        f"Silver Quality Gate: "
-        f"{gate['silver_min_score']}"
-    )
-
-
-def main():
+def get_spark_session():
 
     spark = (
         SparkSession
         .builder
+        .appName(
+            "Campaign Data Quality Framework"
+        )
         .getOrCreate()
+    )
+
+    return spark
+
+
+# ============================================================
+# PRINT CONFIGURATION
+# ============================================================
+
+def print_configuration(cfg):
+
+    framework = cfg["framework"]
+
+    print()
+    print("=" * 70)
+    print("CAMPAIGN DATA QUALITY FRAMEWORK")
+    print("=" * 70)
+
+    print(
+        f"Catalog           : "
+        f"{framework['catalog']}"
+    )
+
+    print(
+        f"Audit Schema      : "
+        f"{framework['audit_schema']}"
+    )
+
+    print(
+        f"Candidate Schema  : "
+        f"{framework['candidate_schema']}"
+    )
+
+    print(
+        f"Quality Gate      : "
+        f"{cfg['quality_gate']}"
+    )
+
+    print(
+        f"Overall Thresholds: "
+        f"{cfg['overall_thresholds']}"
+    )
+
+    print(
+        f"ML Weighting      : "
+        f"{cfg['ml_weighting']}"
+    )
+
+    print()
+
+
+# ============================================================
+# PROCESS ONE TABLE
+# ============================================================
+
+def process_table(
+    spark,
+    cfg,
+    catalog,
+    schema,
+    table,
+):
+
+    source = (
+        f"{catalog}.{schema}.{table}"
+    )
+
+    print()
+    print("=" * 70)
+    print(f"PROCESSING TABLE: {source}")
+    print("=" * 70)
+
+    run_timestamp = datetime.now()
+
+    # --------------------------------------------------------
+    # LOAD TABLE
+    # --------------------------------------------------------
+
+    try:
+
+        df = spark.table(source)
+
+    except Exception as exc:
+
+        print(
+            f"ERROR loading table {source}: "
+            f"{exc}"
+        )
+
+        return None, [], []
+
+    # --------------------------------------------------------
+    # BASIC TABLE INFORMATION
+    # --------------------------------------------------------
+
+    row_count = df.count()
+    column_count = len(df.columns)
+
+    print(
+        f"Rows    : {row_count}"
+    )
+
+    print(
+        f"Columns : {column_count}"
+    )
+
+    # --------------------------------------------------------
+    # PROFILE TABLE
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "Running data profiling..."
     )
 
     try:
 
-        # ====================================================
-        # LOAD CONFIGURATION
-        # ====================================================
-
-        cfg = load_config()
-
-        print_configuration(
-            cfg
+        profile_rows = profile_table(
+            df,
+            catalog,
+            schema,
+            table
         )
 
-        catalog = cfg[
-            "framework"
-        ][
-            "catalog"
-        ]
-
-        # ====================================================
-        # CREATE FRAMEWORK SCHEMAS
-        # ====================================================
-
-        print()
-        print("=" * 60)
-        print("CREATING FRAMEWORK SCHEMAS")
-        print("=" * 60)
-
-        create_framework_schemas(
-            spark,
-            cfg
+        candidate_rows = (
+            create_rule_candidates(
+                profile_rows
+            )
         )
 
-        # ====================================================
-        # DISCOVER TABLES
-        # ====================================================
-
-        tables = discover_tables(
-            spark,
-            cfg
-        )
-
-        print()
         print(
-            f"Tables discovered: "
-            f"{len(tables)}"
+            f"Profile rows    : "
+            f"{len(profile_rows)}"
         )
 
-        if not tables:
+        print(
+            f"Rule candidates : "
+            f"{len(candidate_rows)}"
+        )
 
-            print()
-            print(
-                "No source tables found."
-            )
+    except Exception as exc:
 
-            print(
-                "Check "
-                "source_schema_allowlist "
-                "in dq_rules.yml."
-            )
-
-            return
-
-        # ====================================================
-        # PROFILING
-        # ====================================================
+        print(
+            f"Profiling error for "
+            f"{source}: {exc}"
+        )
 
         profile_rows = []
+        candidate_rows = []
 
-        if cfg.get(
-            "profiling",
-            {}
-        ).get(
-            "enabled",
-            True
-        ):
+    # --------------------------------------------------------
+    # RUN DQ CHECKS
+    # --------------------------------------------------------
 
-            print()
-            print("=" * 60)
-            print("DQX-STYLE PROFILING")
-            print("=" * 60)
+    print()
+    print(
+        "Running DQ01 - DQ16..."
+    )
 
-            for (
-                source_catalog,
-                source_schema,
-                table
-            ) in tables:
+    results, details = run_all_dq(
+        spark,
+        df,
+        catalog,
+        schema,
+        table,
+        cfg
+    )
 
-                source = (
-                    f"{source_catalog}."
-                    f"{source_schema}."
-                    f"{table}"
-                )
+    # --------------------------------------------------------
+    # PRINT DQ RESULTS
+    # --------------------------------------------------------
 
-                try:
+    print()
+    print("-" * 70)
+    print(
+        f"DQ RESULTS: {source}"
+    )
+    print("-" * 70)
 
-                    df = read_source_table(
-                        spark,
-                        source_catalog,
-                        source_schema,
-                        table
-                    )
+    for detail in details:
 
-                    rows = profile_table(
-                        df,
-                        source_catalog,
-                        source_schema,
-                        table
-                    )
+        print(
+            f"{detail['dq_id']} | "
+            f"{detail['status']} | "
+            f"Failure %: "
+            f"{detail['failure_percentage']:.2f} | "
+            f"Failed: "
+            f"{detail['failed_records']}"
+        )
 
-                    profile_rows.extend(
-                        rows
-                    )
+    # --------------------------------------------------------
+    # CALCULATE SCORE
+    # --------------------------------------------------------
 
-                except Exception as exc:
+    score = calculate_score(
+        cfg,
+        results
+    )
 
-                    print(
-                        f"Profiling failed for "
-                        f"{source}: {exc}"
-                    )
+    status = overall_status(
+        score,
+        cfg["overall_thresholds"]
+    )
 
-            if profile_rows:
+    print()
+    print(
+        f"Overall Score : {score:.2f}%"
+    )
 
-                null_threshold = float(
-                    cfg.get(
-                        "profiling",
-                        {}
-                    ).get(
-                        "candidate_null_rate_pct",
-                        1
-                    )
-                )
+    print(
+        f"Overall Status: {status}"
+    )
 
-                candidates = (
-                    create_rule_candidates(
-                        profile_rows,
-                        null_threshold
-                    )
-                )
+    # --------------------------------------------------------
+    # QUALITY GATE
+    # --------------------------------------------------------
 
-                if candidates:
+    quality_gate = cfg[
+        "quality_gate"
+    ]
 
-                    print()
-                    print(
-                        f"Rule candidates "
-                        f"generated: "
-                        f"{len(candidates)}"
-                    )
+    gate_threshold = float(
+        quality_gate.get(
+            "threshold",
+            0
+        )
+    )
 
-        # ====================================================
-        # DQ EXECUTION
-        # ====================================================
+    gate_enabled = quality_gate.get(
+        "enabled",
+        True
+    )
+
+    if not gate_enabled:
+
+        gate_status = "DISABLED"
+
+    elif score >= gate_threshold:
+
+        gate_status = "PASSED"
+
+    else:
+
+        gate_status = "FAILED"
+
+    print(
+        f"Quality Gate  : {gate_status}"
+    )
+
+    print(
+        f"Gate Threshold: "
+        f"{gate_threshold:.2f}%"
+    )
+
+    # --------------------------------------------------------
+    # BUILD SUMMARY ROW
+    # --------------------------------------------------------
+
+    summary_row = {
+
+        "catalog": catalog,
+
+        "schema": schema,
+
+        "table": table,
+
+        "run_timestamp":
+            run_timestamp,
+
+        "row_count":
+            int(row_count),
+
+        "column_count":
+            int(column_count),
+
+        "dq01":
+            results.get("DQ01", "WARNING"),
+
+        "dq02":
+            results.get("DQ02", "WARNING"),
+
+        "dq03":
+            results.get("DQ03", "WARNING"),
+
+        "dq04":
+            results.get("DQ04", "WARNING"),
+
+        "dq05":
+            results.get("DQ05", "WARNING"),
+
+        "dq06":
+            results.get("DQ06", "WARNING"),
+
+        "dq07":
+            results.get("DQ07", "WARNING"),
+
+        "dq08":
+            results.get("DQ08", "WARNING"),
+
+        "dq09":
+            results.get("DQ09", "WARNING"),
+
+        "dq10":
+            results.get("DQ10", "WARNING"),
+
+        "dq11":
+            results.get("DQ11", "WARNING"),
+
+        "dq12":
+            results.get("DQ12", "WARNING"),
+
+        "dq13":
+            results.get("DQ13", "WARNING"),
+
+        "dq14":
+            results.get("DQ14", "WARNING"),
+
+        "dq15":
+            results.get("DQ15", "WARNING"),
+
+        "dq16":
+            results.get("DQ16", "WARNING"),
+
+        "dq_score":
+            float(score),
+
+        "overall_status":
+            status,
+
+        "quality_gate":
+            gate_status,
+    }
+
+    # --------------------------------------------------------
+    # BUILD DETAIL ROWS
+    # --------------------------------------------------------
+
+    detail_rows = []
+
+    for detail in details:
+
+        detail_rows.append({
+
+            "catalog":
+                catalog,
+
+            "schema":
+                schema,
+
+            "table":
+                table,
+
+            "run_timestamp":
+                run_timestamp,
+
+            "dq_id":
+                detail["dq_id"],
+
+            "status":
+                detail["status"],
+
+            "failure_percentage":
+                float(
+                    detail[
+                        "failure_percentage"
+                    ]
+                ),
+
+            "failed_records":
+                int(
+                    detail[
+                        "failed_records"
+                    ]
+                ),
+        })
+
+    return (
+        summary_row,
+        detail_rows,
+        profile_rows,
+        candidate_rows,
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print()
+    print("=" * 70)
+    print(
+        "STARTING CAMPAIGN DATA QUALITY PIPELINE"
+    )
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # LOAD CONFIGURATION
+    # --------------------------------------------------------
+
+    cfg = load_config()
+
+    print_configuration(cfg)
+
+    # --------------------------------------------------------
+    # CREATE SPARK SESSION
+    # --------------------------------------------------------
+
+    spark = get_spark_session()
+
+    # --------------------------------------------------------
+    # DISCOVER TABLES
+    # --------------------------------------------------------
+
+    tables = discover_tables(
+        spark,
+        cfg
+    )
+
+    if not tables:
 
         print()
-        print("=" * 60)
         print(
-            "BRONZE -> DQ -> "
-            "QUARANTINE -> SILVER -> GOLD"
+            "No tables found for processing."
         )
-        print("=" * 60)
 
-        summary_rows = []
-        detail_rows = []
+        spark.stop()
 
-        for (
-            source_catalog,
-            source_schema,
-            table
-        ) in tables:
+        return
 
-            source = (
-                f"{source_catalog}."
-                f"{source_schema}."
-                f"{table}"
+    # --------------------------------------------------------
+    # PROCESS ALL TABLES
+    # --------------------------------------------------------
+
+    summary_rows = []
+    detail_rows = []
+    profile_rows = []
+    candidate_rows = []
+
+    successful_tables = 0
+    failed_tables = 0
+
+    for (
+        catalog,
+        schema,
+        table
+    ) in tables:
+
+        try:
+
+            result = process_table(
+                spark,
+                cfg,
+                catalog,
+                schema,
+                table
             )
 
-            print()
-            print("-" * 60)
-            print(
-                f"Checking: {source}"
-            )
-            print("-" * 60)
-
-            run_id = str(
-                uuid.uuid4()
-            )
-
-            try:
-
-                # ============================================
-                # SOURCE
-                # ============================================
-
-                source_df = read_source_table(
-                    spark,
-                    source_catalog,
-                    source_schema,
-                    table
-                )
-
-                # ============================================
-                # BRONZE
-                # ============================================
-
-                bronze_df, mapping = (
-                    write_bronze(
-                        spark,
-                        source_df,
-                        source_catalog,
-                        source_schema,
-                        table,
-                        cfg
-                    )
-                )
-
-                changed_columns = {
-                    original: safe
-                    for original, safe
-                    in mapping.items()
-                    if original != safe
-                }
-
-                if changed_columns:
-
-                    print(
-                        "Column normalization:"
-                    )
-
-                    for (
-                        original,
-                        safe
-                    ) in changed_columns.items():
-
-                        print(
-                            f"  {original} "
-                            f"-> {safe}"
-                        )
-
-                # ============================================
-                # DQ
-                # ============================================
-
-                results, details = (
-                    run_all_dq(
-                        spark,
-                        bronze_df,
-                        source_catalog,
-                        source_schema,
-                        table,
-                        cfg
-                    )
-                )
-
-                # ============================================
-                # SCORE
-                # ============================================
-
-                score = calculate_score(
-                    cfg,
-                    results
-                )
-
-                status = overall_status(
-                    score,
-                    cfg[
-                        "overall_thresholds"
-                    ]
-                )
-
-                status_string = " | ".join(
-                    f"{dq_id}="
-                    f"{results.get(dq_id, 'N/A')}"
-                    for dq_id in DQ_IDS
-                )
-
-                print()
-                print(
-                    f"{status_string}"
-                )
-
-                print(
-                    f"Score={score}% | "
-                    f"Overall={status}"
-                )
-
-                # ============================================
-                # QUARANTINE
-                # ============================================
-
-                # The row-level quarantine condition is built
-                # from configured row/business/range rules.
-
-                quarantine_condition = None
-
-                table_rule = cfg.get(
-                    "table_rules",
-                    {}
-                ).get(
-                    source,
-                    {}
-                )
-
-                if results.get(
-                    "DQ02"
-                ) in (
-                    "FAIL",
-                    "WARNING"
-                ):
-
-                    for expression in (
-                        table_rule.get(
-                            "row_expressions",
-                            {}
-                        ).values()
-                    ):
-
-                        try:
-
-                            invalid = (
-                                ~spark
-                                .createDataFrame(
-                                    [(True,)],
-                                    ["dummy"]
-                                )
-                                .select(
-                                    invalid
-                                )
-                            )
-
-                        except Exception:
-                            pass
-
-                # Build quarantine conditions directly
-                # against the Bronze DataFrame.
-
-                from pyspark.sql import functions as F
-
-                expressions = []
-
-                if results.get(
-                    "DQ02"
-                ) in (
-                    "FAIL",
-                    "WARNING"
-                ):
-
-                    expressions.extend(
-                        table_rule.get(
-                            "row_expressions",
-                            {}
-                        ).values()
-                    )
-
-                if results.get(
-                    "DQ05"
-                ) in (
-                    "FAIL",
-                    "WARNING"
-                ):
-
-                    expressions.extend(
-                        table_rule.get(
-                            "consistency_rules",
-                            {}
-                        ).values()
-                    )
-
-                if results.get(
-                    "DQ15"
-                ) in (
-                    "FAIL",
-                    "WARNING"
-                ):
-
-                    expressions.extend(
-                        table_rule.get(
-                            "business_rules",
-                            {}
-                        ).values()
-                    )
-
-                if expressions:
-
-                    for expression in expressions:
-
-                        try:
-
-                            invalid = (
-                                F.coalesce(
-                                    F.expr(
-                                        expression
-                                    ),
-                                    F.lit(False)
-                                )
-                                == F.lit(False)
-                            )
-
-                            quarantine_condition = (
-                                invalid
-                                if quarantine_condition
-                                is None
-                                else
-                                quarantine_condition
-                                | invalid
-                            )
-
-                        except Exception as exc:
-
-                            print(
-                                "Quarantine expression "
-                                f"skipped: {exc}"
-                            )
-
-                quarantine_count = (
-                    create_quarantine(
-                        spark,
-                        bronze_df,
-                        quarantine_condition,
-                        source_catalog,
-                        source_schema,
-                        table,
-                        cfg,
-                        run_id
-                    )
-                )
-
-                # ============================================
-                # SILVER
-                # ============================================
-
-                silver_created = create_silver(
-                    spark,
-                    bronze_df,
-                    source_catalog,
-                    table,
-                    cfg,
-                    score
-                )
-
-                # ============================================
-                # GOLD
-                # ============================================
-
-                gold_created = False
-
-                if silver_created:
-
-                    gold_created = create_gold(
-                        spark,
-                        source_catalog,
-                        table,
-                        cfg,
-                        score,
-                        status
-                    )
-
-                # ============================================
-                # SUMMARY
-                # ============================================
-
-                row_count = source_df.count()
-
-                summary = {
-                    "run_id":
-                        run_id,
-
-                    "run_timestamp":
-                        datetime.now(),
-
-                    "catalog":
-                        source_catalog,
-
-                    "schema":
-                        source_schema,
-
-                    "table":
-                        table,
-
-                    "row_count":
-                        int(row_count),
-
-                    "DQ01":
-                        results["DQ01"],
-
-                    "DQ02":
-                        results["DQ02"],
-
-                    "DQ03":
-                        results["DQ03"],
-
-                    "DQ04":
-                        results["DQ04"],
-
-                    "DQ05":
-                        results["DQ05"],
-
-                    "DQ06":
-                        results["DQ06"],
-
-                    "DQ07":
-                        results["DQ07"],
-
-                    "DQ08":
-                        results["DQ08"],
-
-                    "DQ09":
-                        results["DQ09"],
-
-                    "DQ10":
-                        results["DQ10"],
-
-                    "DQ11":
-                        results["DQ11"],
-
-                    "DQ12":
-                        results["DQ12"],
-
-                    "DQ13":
-                        results["DQ13"],
-
-                    "DQ14":
-                        results["DQ14"],
-
-                    "DQ15":
-                        results["DQ15"],
-
-                    "DQ16":
-                        results["DQ16"],
-
-                    "total_score":
-                        float(score),
-
-                    "overall_status":
-                        status,
-
-                    "silver_created":
-                        bool(
-                            silver_created
-                        ),
-
-                    "gold_created":
-                        bool(
-                            gold_created
-                        ),
-
-                    "quarantined_records":
-                        int(
-                            quarantine_count
-                        ),
-                }
+            if result is None:
+
+                failed_tables += 1
+                continue
+
+            (
+                summary,
+                details,
+                profiles,
+                candidates,
+            ) = result
+
+            if summary:
 
                 summary_rows.append(
                     summary
                 )
 
-                for detail in details:
+            detail_rows.extend(
+                details
+            )
 
-                    detail_rows.append({
+            profile_rows.extend(
+                profiles
+            )
 
-                        "run_id":
-                            run_id,
+            candidate_rows.extend(
+                candidates
+            )
 
-                        "run_timestamp":
-                            datetime.now(),
+            successful_tables += 1
 
-                        "catalog":
-                            source_catalog,
+        except Exception as exc:
 
-                        "schema":
-                            source_schema,
+            failed_tables += 1
 
-                        "table":
-                            table,
+            print()
+            print(
+                f"FAILED TABLE: "
+                f"{catalog}.{schema}.{table}"
+            )
 
-                        "dq_id":
-                            detail["dq_id"],
+            print(
+                f"Reason: {exc}"
+            )
 
-                        "status":
-                            detail["status"],
+    # --------------------------------------------------------
+    # WRITE AUDIT RESULTS
+    # --------------------------------------------------------
 
-                        "failure_percentage":
-                            float(
-                                detail[
-                                    "failure_percentage"
-                                ]
-                            ),
+    print()
+    print("=" * 70)
+    print("WRITING AUDIT RESULTS")
+    print("=" * 70)
 
-                        "failed_records":
-                            int(
-                                detail[
-                                    "failed_records"
-                                ]
-                            )
-                    })
-
-            except Exception as exc:
-
-                print()
-                print(
-                    f"Pipeline failed for "
-                    f"{source}"
-                )
-
-                print(
-                    f"Error: {exc}"
-                )
-
-                traceback.print_exc()
-
-                # Continue with the next table.
-
-        # ====================================================
-        # AUDIT
-        # ====================================================
-
-        print()
-        print("=" * 60)
-        print("WRITING AUDIT RESULTS")
-        print("=" * 60)
+    try:
 
         write_audit(
             spark,
@@ -764,75 +561,153 @@ def main():
             profile_rows
         )
 
-        # ====================================================
-        # FINAL REPORT
-        # ====================================================
-
-        print_final_report(
-            spark,
-            cfg
-        )
-
-        print()
-        print("=" * 60)
-        print("PIPELINE COMPLETE")
-        print("=" * 60)
-
-        audit_schema = cfg[
-            "framework"
-        ][
-            "audit_schema"
-        ]
-
-        profiling_schema = cfg[
-            "framework"
-        ][
-            "candidate_schema"
-        ]
-
         print(
-            f"Summary: "
-            f"{catalog}."
-            f"{audit_schema}."
-            f"{cfg['output_tables']['summary']}"
-        )
-
-        print(
-            f"Audit: "
-            f"{catalog}."
-            f"{audit_schema}."
-            f"{cfg['output_tables']['audit']}"
-        )
-
-        print(
-            f"Profile: "
-            f"{catalog}."
-            f"{profiling_schema}."
-            f"{cfg['output_tables']['profiling']}"
-        )
-
-        print(
-            f"Candidates: "
-            f"{catalog}."
-            f"{profiling_schema}."
-            f"{cfg['output_tables']['candidates']}"
+            "Audit results written successfully."
         )
 
     except Exception as exc:
 
-        print()
-        print("=" * 60)
-        print("FATAL PIPELINE ERROR")
-        print("=" * 60)
-
         print(
-            str(exc)
+            f"Audit write failed: {exc}"
         )
 
-        traceback.print_exc()
+    # --------------------------------------------------------
+    # WRITE RULE CANDIDATES
+    # --------------------------------------------------------
 
-        raise
+    if candidate_rows:
 
+        try:
+
+            candidate_schema = cfg[
+                "framework"
+            ][
+                "candidate_schema"
+            ]
+
+            candidate_table = cfg[
+                "output_tables"
+            ].get(
+                "candidates"
+            )
+
+            if candidate_table:
+
+                candidate_df = (
+                    spark.createDataFrame(
+                        candidate_rows
+                    )
+                )
+
+                (
+                    candidate_df.write
+                    .format("delta")
+                    .mode("overwrite")
+                    .option(
+                        "overwriteSchema",
+                        "true"
+                    )
+                    .saveAsTable(
+                        f"`{cfg['framework']['catalog']}`."
+                        f"`{candidate_schema}`."
+                        f"`{candidate_table}`"
+                    )
+                )
+
+                print(
+                    "Rule candidates written successfully."
+                )
+
+        except Exception as exc:
+
+            print(
+                f"Candidate write failed: "
+                f"{exc}"
+            )
+
+    # --------------------------------------------------------
+    # FINAL REPORT
+    # --------------------------------------------------------
+
+    print_final_report(
+        spark,
+        cfg
+    )
+
+    # --------------------------------------------------------
+    # PIPELINE SUMMARY
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("PIPELINE EXECUTION SUMMARY")
+    print("=" * 70)
+
+    print(
+        f"Tables discovered : "
+        f"{len(tables)}"
+    )
+
+    print(
+        f"Tables processed  : "
+        f"{successful_tables}"
+    )
+
+    print(
+        f"Tables failed     : "
+        f"{failed_tables}"
+    )
+
+    print(
+        f"Summary records   : "
+        f"{len(summary_rows)}"
+    )
+
+    print(
+        f"Detail records    : "
+        f"{len(detail_rows)}"
+    )
+
+    print(
+        f"Profile records   : "
+        f"{len(profile_rows)}"
+    )
+
+    print(
+        f"Rule candidates   : "
+        f"{len(candidate_rows)}"
+    )
+
+    print()
+    print(
+        "=" * 70
+    )
+
+    if failed_tables == 0:
+
+        print(
+            "PIPELINE COMPLETED SUCCESSFULLY"
+        )
+
+    else:
+
+        print(
+            "PIPELINE COMPLETED WITH TABLE ERRORS"
+        )
+
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # STOP SPARK
+    # --------------------------------------------------------
+
+    spark.stop()
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
+
     main()

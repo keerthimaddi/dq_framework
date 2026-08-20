@@ -1,2 +1,3 @@
 pyspark
 PyYAML
+delta-spark

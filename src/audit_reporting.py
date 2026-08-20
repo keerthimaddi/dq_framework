@@ -2,8 +2,6 @@
 # AUDIT REPORTING
 # ============================================================
 
-from datetime import datetime
-
 from pyspark.sql import functions as F
 
 
@@ -29,6 +27,32 @@ def table_name(
     )
 
 
+# ============================================================
+# WRITE DELTA TABLE SAFELY
+# ============================================================
+
+def write_delta_table(
+    df,
+    target,
+    mode="append"
+):
+
+    (
+        df.write
+        .format("delta")
+        .mode(mode)
+        .option(
+            "mergeSchema",
+            "true"
+        )
+        .saveAsTable(target)
+    )
+
+
+# ============================================================
+# WRITE AUDIT
+# ============================================================
+
 def write_audit(
     spark,
     cfg,
@@ -37,21 +61,19 @@ def write_audit(
     profile_rows
 ):
 
-    catalog = cfg[
+    framework = cfg[
         "framework"
-    ][
+    ]
+
+    catalog = framework[
         "catalog"
     ]
 
-    audit_schema = cfg[
-        "framework"
-    ][
+    audit_schema = framework[
         "audit_schema"
     ]
 
-    profiling_schema = cfg[
-        "framework"
-    ][
+    profiling_schema = framework[
         "candidate_schema"
     ]
 
@@ -59,26 +81,38 @@ def write_audit(
         "output_tables"
     ]
 
+    # --------------------------------------------------------
+    # SUMMARY
+    # --------------------------------------------------------
+
     if summary_rows:
 
         summary_df = spark.createDataFrame(
             summary_rows
         )
 
-        (
-            summary_df.write
-            .format("delta")
-            .mode("append")
-            .saveAsTable(
-                table_name(
-                    catalog,
-                    audit_schema,
-                    output_tables[
-                        "summary"
-                    ]
-                )
-            )
+        target = table_name(
+            catalog,
+            audit_schema,
+            output_tables[
+                "summary"
+            ]
         )
+
+        write_delta_table(
+            summary_df,
+            target,
+            "append"
+        )
+
+        print(
+            f"Audit summary written: "
+            f"{target}"
+        )
+
+    # --------------------------------------------------------
+    # DETAIL
+    # --------------------------------------------------------
 
     if detail_rows:
 
@@ -86,25 +120,41 @@ def write_audit(
             detail_rows
         )
 
-        (
-            detail_df.write
-            .format("delta")
-            .mode("append")
-            .saveAsTable(
-                table_name(
-                    catalog,
-                    audit_schema,
-                    output_tables[
-                        "audit"
-                    ]
-                )
-            )
+        target = table_name(
+            catalog,
+            audit_schema,
+            output_tables[
+                "audit"
+            ]
         )
+
+        write_delta_table(
+            detail_df,
+            target,
+            "append"
+        )
+
+        print(
+            f"Audit detail written: "
+            f"{target}"
+        )
+
+    # --------------------------------------------------------
+    # PROFILING
+    # --------------------------------------------------------
 
     if profile_rows:
 
         profile_df = spark.createDataFrame(
             profile_rows
+        )
+
+        target = table_name(
+            catalog,
+            profiling_schema,
+            output_tables[
+                "profiling"
+            ]
         )
 
         (
@@ -115,17 +165,18 @@ def write_audit(
                 "overwriteSchema",
                 "true"
             )
-            .saveAsTable(
-                table_name(
-                    catalog,
-                    profiling_schema,
-                    output_tables[
-                        "profiling"
-                    ]
-                )
-            )
+            .saveAsTable(target)
         )
 
+        print(
+            f"Profiling table written: "
+            f"{target}"
+        )
+
+
+# ============================================================
+# FINAL REPORT
+# ============================================================
 
 def print_final_report(
     spark,
@@ -151,9 +202,9 @@ def print_final_report(
     )
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("FINAL DATA QUALITY REPORT")
-    print("=" * 60)
+    print("=" * 70)
 
     if not spark.catalog.tableExists(
         summary_table
@@ -165,16 +216,18 @@ def print_final_report(
 
         return
 
-    df = (
-        spark.table(
-            summary_table
-        )
-        .orderBy(
+    df = spark.table(
+        summary_table
+    )
+
+    # Most recent run first
+    if "run_timestamp" in df.columns:
+
+        df = df.orderBy(
             F.col(
                 "run_timestamp"
             ).desc()
         )
-    )
 
     df.show(
         100,
@@ -183,5 +236,6 @@ def print_final_report(
 
     print()
     print(
-        f"Summary: {summary_table}"
+        f"Summary Table: "
+        f"{summary_table}"
     )

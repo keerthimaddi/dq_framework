@@ -1261,6 +1261,10 @@ def dq16_volume(
 # SCORE
 # ============================================================
 
+# ============================================================
+# SCORE
+# ============================================================
+
 def calculate_score(
     cfg,
     results
@@ -1277,53 +1281,42 @@ def calculate_score(
         ):
             continue
 
+        dq_id = rule["id"]
+
         weight = float(
-            rule["default_weight"]
+            rule.get(
+                "default_weight",
+                0
+            )
         )
 
         total_weight += weight
 
-        if (
-            results.get(
-                rule["id"]
-            )
-            == "PASS"
-        ):
+        if results.get(
+            dq_id
+        ) == "PASS":
 
             earned_weight += weight
 
     if total_weight == 0:
+
         return 0.0
 
-    return round(
+    score = (
         earned_weight
         / total_weight
-        * 100,
+        * 100
+    )
+
+    return round(
+        score,
         2
     )
 
 
-def overall_status(
-    score,
-    thresholds
-):
-
-    score = float(score)
-
-    if score >= float(
-        thresholds["pass"]
-    ):
-
-        return "PASS"
-
-    if score >= float(
-        thresholds["warning"]
-    ):
-
-        return "WARNING"
-
-    return "FAIL"
-
+# ============================================================
+# RUN ALL DQ CHECKS
+# ============================================================
 
 # ============================================================
 # RUN ALL DQ CHECKS
@@ -1338,7 +1331,7 @@ def run_all_dq(
     cfg
 ):
 
-    rule = get_table_rule(
+    table_rule = get_table_rule(
         cfg,
         catalog,
         schema,
@@ -1348,27 +1341,157 @@ def run_all_dq(
     results = {}
     details = []
 
+    # --------------------------------------------------------
+    # GLOBAL DQ RULE CONFIGURATION
+    # --------------------------------------------------------
+
+    global_rules = {
+        rule["id"]: rule
+        for rule in cfg["dq_rules"]
+    }
+
+    # --------------------------------------------------------
+    # MERGE GLOBAL RULE + TABLE-SPECIFIC CONFIGURATION
+    # --------------------------------------------------------
+
+    merged_rules = {}
+
+    for dq_id in [
+        f"DQ{i:02d}"
+        for i in range(1, 17)
+    ]:
+
+        base_rule = dict(
+            global_rules.get(
+                dq_id,
+                {}
+            )
+        )
+
+        # Table rule can contain:
+        #
+        # DQ01:
+        #   mandatory_columns: [...]
+        #
+        # OR flat configuration.
+        #
+        if dq_id in table_rule:
+
+            specific = table_rule[
+                dq_id
+            ]
+
+            if isinstance(
+                specific,
+                dict
+            ):
+
+                base_rule.update(
+                    specific
+                )
+
+        # Also support table-level
+        # properties directly.
+        #
+        # Example:
+        # mandatory_columns: [...]
+        #
+        # for DQ01.
+        property_map = {
+            "DQ01":
+                "mandatory_columns",
+            "DQ02":
+                "row_expressions",
+            "DQ03":
+                "allowed_values",
+            "DQ04":
+                "unique_keys",
+            "DQ05":
+                "consistency_rules",
+            "DQ07":
+                "date_columns",
+            "DQ08":
+                "conformity_rules",
+            "DQ09":
+                "range_rules",
+            "DQ10":
+                "unique_keys",
+            "DQ11":
+                "null_columns",
+            "DQ12":
+                "length_rules",
+            "DQ13":
+                "expected_types",
+            "DQ14":
+                "pattern_rules",
+            "DQ15":
+                "business_rules",
+        }
+
+        if dq_id in property_map:
+
+            property_name = (
+                property_map[dq_id]
+            )
+
+            if (
+                property_name
+                in table_rule
+            ):
+
+                base_rule[
+                    property_name
+                ] = table_rule[
+                    property_name
+                ]
+
+        merged_rules[
+            dq_id
+        ] = base_rule
+
+    # --------------------------------------------------------
+    # DQ FUNCTION MAP
+    # --------------------------------------------------------
+
     functions = {
         "DQ01": dq01_completeness,
+
         "DQ02": dq02_accuracy,
+
         "DQ03": dq03_validity,
+
         "DQ04": dq04_uniqueness,
+
         "DQ05": dq05_consistency,
+
         "DQ07": lambda d, r:
             dq07_timeliness(
                 d,
                 r,
                 cfg
             ),
+
         "DQ08": dq08_conformity,
+
         "DQ09": dq09_range,
+
         "DQ10": dq10_duplicate,
+
         "DQ11": dq11_null,
+
         "DQ12": dq12_length,
+
         "DQ13": dq13_data_type,
+
         "DQ14": dq14_pattern,
+
         "DQ15": dq15_business_rule,
     }
+
+    # --------------------------------------------------------
+    # DQ01-DQ05
+    # DQ07-DQ15
+    # --------------------------------------------------------
 
     for dq_id in [
         "DQ01",
@@ -1387,12 +1510,52 @@ def run_all_dq(
         "DQ15",
     ]:
 
+        rule_definition = (
+            global_rules.get(
+                dq_id,
+                {}
+            )
+        )
+
+        enabled = rule_definition.get(
+            "enabled",
+            True
+        )
+
+        # ----------------------------------------------------
+        # DISABLED RULE
+        # ----------------------------------------------------
+
+        if not enabled:
+
+            results[dq_id] = "SKIPPED"
+
+            details.append({
+                "dq_id":
+                    dq_id,
+
+                "status":
+                    "SKIPPED",
+
+                "failure_percentage":
+                    0.0,
+
+                "failed_records":
+                    0
+            })
+
+            continue
+
+        # ----------------------------------------------------
+        # EXECUTE RULE
+        # ----------------------------------------------------
+
         try:
 
             status, percentage, failed = (
                 functions[dq_id](
                     df,
-                    rule
+                    merged_rules[dq_id]
                 )
             )
 
@@ -1404,90 +1567,167 @@ def run_all_dq(
             )
 
             status = "WARNING"
+
             percentage = 0.0
+
             failed = 0
 
         results[dq_id] = status
 
         details.append({
-            "dq_id": dq_id,
-            "status": status,
+            "dq_id":
+                dq_id,
+
+            "status":
+                status,
+
             "failure_percentage":
                 float(percentage),
+
             "failed_records":
                 int(failed)
         })
 
-    # DQ06
-    try:
+    # --------------------------------------------------------
+    # DQ06 - INTEGRITY
+    # --------------------------------------------------------
 
-        status, percentage, failed = (
-            dq06_integrity(
-                spark,
-                df,
-                catalog,
-                schema,
-                table,
-                cfg
+    dq06_enabled = global_rules[
+        "DQ06"
+    ].get(
+        "enabled",
+        True
+    )
+
+    if dq06_enabled:
+
+        try:
+
+            status, percentage, failed = (
+                dq06_integrity(
+                    spark,
+                    df,
+                    catalog,
+                    schema,
+                    table,
+                    cfg
+                )
             )
-        )
 
-    except Exception as exc:
+        except Exception as exc:
 
-        print(
-            f"DQ06 execution error "
-            f"for {table}: {exc}"
-        )
-
-        status = "WARNING"
-        percentage = 0.0
-        failed = 0
-
-    results["DQ06"] = status
-
-    details.append({
-        "dq_id": "DQ06",
-        "status": status,
-        "failure_percentage":
-            float(percentage),
-        "failed_records":
-            int(failed)
-    })
-
-    # DQ16
-    try:
-
-        status, percentage, row_count = (
-            dq16_volume(
-                spark,
-                df,
-                catalog,
-                schema,
-                table,
-                cfg
+            print(
+                f"DQ06 execution error "
+                f"for {table}: {exc}"
             )
-        )
 
-    except Exception as exc:
+            status = "WARNING"
+            percentage = 0.0
+            failed = 0
 
-        print(
-            f"DQ16 execution error "
-            f"for {table}: {exc}"
-        )
+        results["DQ06"] = status
 
-        status = "WARNING"
-        percentage = 0.0
-        row_count = df.count()
+        details.append({
+            "dq_id":
+                "DQ06",
 
-    results["DQ16"] = status
+            "status":
+                status,
 
-    details.append({
-        "dq_id": "DQ16",
-        "status": status,
-        "failure_percentage":
-            float(percentage),
-        "failed_records":
-            0
-    })
+            "failure_percentage":
+                float(percentage),
+
+            "failed_records":
+                int(failed)
+        })
+
+    else:
+
+        results["DQ06"] = "SKIPPED"
+
+        details.append({
+            "dq_id":
+                "DQ06",
+
+            "status":
+                "SKIPPED",
+
+            "failure_percentage":
+                0.0,
+
+            "failed_records":
+                0
+        })
+
+    # --------------------------------------------------------
+    # DQ16 - VOLUME
+    # --------------------------------------------------------
+
+    dq16_enabled = global_rules[
+        "DQ16"
+    ].get(
+        "enabled",
+        True
+    )
+
+    if dq16_enabled:
+
+        try:
+
+            status, percentage, row_count = (
+                dq16_volume(
+                    spark,
+                    df,
+                    catalog,
+                    schema,
+                    table,
+                    cfg
+                )
+            )
+
+        except Exception as exc:
+
+            print(
+                f"DQ16 execution error "
+                f"for {table}: {exc}"
+            )
+
+            status = "WARNING"
+            percentage = 0.0
+            row_count = df.count()
+
+        results["DQ16"] = status
+
+        details.append({
+            "dq_id":
+                "DQ16",
+
+            "status":
+                status,
+
+            "failure_percentage":
+                float(percentage),
+
+            "failed_records":
+                0
+        })
+
+    else:
+
+        results["DQ16"] = "SKIPPED"
+
+        details.append({
+            "dq_id":
+                "DQ16",
+
+            "status":
+                "SKIPPED",
+
+            "failure_percentage":
+                0.0,
+
+            "failed_records":
+                0
+        })
 
     return results, details

@@ -1,11 +1,17 @@
 # ============================================================
+# CAMPAIGN DATA QUALITY FRAMEWORK
 # LAKEHOUSE
+# DATABRICKS UNITY CATALOG ONLY
 # ============================================================
 
 import re
 
 from pyspark.sql import functions as F
 
+
+# ============================================================
+# IDENTIFIER HELPERS
+# ============================================================
 
 def quote_identifier(identifier):
 
@@ -56,6 +62,44 @@ def safe_column_name(name):
     return name.lower()
 
 
+# ============================================================
+# UNITY CATALOG VALIDATION
+# ============================================================
+
+def validate_unity_catalog(
+    spark,
+    catalog
+):
+
+    try:
+
+        catalogs = {
+            row.catalog
+            for row in spark.sql(
+                "SHOW CATALOGS"
+            ).collect()
+        }
+
+    except Exception as exc:
+
+        raise RuntimeError(
+            "Unable to access Unity Catalog."
+        ) from exc
+
+    if catalog not in catalogs:
+
+        raise RuntimeError(
+            f"Unity Catalog '{catalog}' "
+            f"does not exist or is not accessible."
+        )
+
+    return True
+
+
+# ============================================================
+# COLUMN NORMALIZATION
+# ============================================================
+
 def normalize_columns(df):
 
     used = set()
@@ -80,9 +124,14 @@ def normalize_columns(df):
 
         used.add(candidate)
 
-        mapping[original] = candidate
+        mapping[
+            original
+        ] = candidate
 
-    for original, safe in mapping.items():
+    for (
+        original,
+        safe
+    ) in mapping.items():
 
         if original != safe:
 
@@ -94,6 +143,10 @@ def normalize_columns(df):
     return df, mapping
 
 
+# ============================================================
+# READ SOURCE TABLE
+# ============================================================
+
 def read_source_table(
     spark,
     catalog,
@@ -101,23 +154,58 @@ def read_source_table(
     table
 ):
 
-    return spark.table(
-        full_table_name(
-            catalog,
-            schema,
-            table
-        )
+    validate_unity_catalog(
+        spark,
+        catalog
     )
 
+    table_name = full_table_name(
+        catalog,
+        schema,
+        table
+    )
+
+    print(
+        f"Reading Unity Catalog table: "
+        f"{catalog}.{schema}.{table}"
+    )
+
+    try:
+
+        return spark.table(
+            table_name
+        )
+
+    except Exception as exc:
+
+        raise RuntimeError(
+            f"Unable to read Unity Catalog table:\n"
+            f"{catalog}.{schema}.{table}\n"
+            f"Reason: {exc}"
+        ) from exc
+
+
+# ============================================================
+# CREATE FRAMEWORK SCHEMAS
+# ============================================================
 
 def create_framework_schemas(
     spark,
     cfg
 ):
 
-    framework = cfg["framework"]
+    framework = cfg[
+        "framework"
+    ]
 
-    catalog = framework["catalog"]
+    catalog = framework[
+        "catalog"
+    ]
+
+    validate_unity_catalog(
+        spark,
+        catalog
+    )
 
     schemas = [
         framework["bronze_schema"],
@@ -128,19 +216,105 @@ def create_framework_schemas(
         framework["candidate_schema"],
     ]
 
+    print()
+    print(
+        f"Creating framework schemas "
+        f"under Unity Catalog: {catalog}"
+    )
+
     for schema in schemas:
 
-        print(
-            f"Checking schema: "
-            f"{catalog}.{schema}"
-        )
-
-        spark.sql(
-            f"CREATE SCHEMA IF NOT EXISTS "
+        schema_name = (
             f"{quote_identifier(catalog)}."
             f"{quote_identifier(schema)}"
         )
 
+        print(
+            f"Checking: "
+            f"{catalog}.{schema}"
+        )
+
+        try:
+
+            spark.sql(
+                f"""
+                CREATE SCHEMA IF NOT EXISTS
+                {schema_name}
+                """
+            )
+
+            print(
+                f"READY: "
+                f"{catalog}.{schema}"
+            )
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                f"Unable to create Unity Catalog schema:\n"
+                f"{catalog}.{schema}\n"
+                f"Reason: {exc}"
+            ) from exc
+
+
+# ============================================================
+# WRITE DELTA TABLE
+# ============================================================
+
+def write_delta_table(
+    df,
+    spark,
+    catalog,
+    schema,
+    table,
+    mode="overwrite"
+):
+
+    validate_unity_catalog(
+        spark,
+        catalog
+    )
+
+    table_name = full_table_name(
+        catalog,
+        schema,
+        table
+    )
+
+    print(
+        f"Writing Delta table: "
+        f"{catalog}.{schema}.{table}"
+    )
+
+    try:
+
+        (
+            df.write
+            .format("delta")
+            .mode(mode)
+            .option(
+                "overwriteSchema",
+                "true"
+            )
+            .saveAsTable(
+                table_name
+            )
+        )
+
+    except Exception as exc:
+
+        raise RuntimeError(
+            f"Unable to write Unity Catalog Delta table:\n"
+            f"{catalog}.{schema}.{table}\n"
+            f"Reason: {exc}"
+        ) from exc
+
+    return table_name
+
+
+# ============================================================
+# WRITE BRONZE
+# ============================================================
 
 def write_bronze(
     spark,
@@ -151,8 +325,8 @@ def write_bronze(
     cfg
 ):
 
-    safe_df, mapping = normalize_columns(
-        df
+    safe_df, mapping = (
+        normalize_columns(df)
     )
 
     bronze_schema = cfg[
@@ -161,56 +335,45 @@ def write_bronze(
         "bronze_schema"
     ]
 
-    bronze_table = (
-        f"{catalog}."
-        f"{bronze_schema}."
-        f"{table}"
-    )
-
-    print(
-        f"Writing Bronze: "
-        f"{bronze_table}"
-    )
-
     safe_df = (
         safe_df
+
         .withColumn(
             "_dq_ingestion_timestamp",
             F.current_timestamp()
         )
+
         .withColumn(
             "_dq_source_catalog",
             F.lit(catalog)
         )
+
         .withColumn(
             "_dq_source_schema",
             F.lit(schema)
         )
+
         .withColumn(
             "_dq_source_table",
             F.lit(table)
         )
     )
 
-    (
-        safe_df.write
-        .format("delta")
-        .mode("overwrite")
-        .option(
-            "overwriteSchema",
-            "true"
-        )
-        .saveAsTable(
-            full_table_name(
-                catalog,
-                bronze_schema,
-                table
-            )
-        )
+    write_delta_table(
+        safe_df,
+        spark,
+        catalog,
+        bronze_schema,
+        table,
+        mode="overwrite"
     )
 
     return safe_df, mapping
 
+
+# ============================================================
+# CREATE SILVER
+# ============================================================
 
 def create_silver(
     spark,
@@ -226,6 +389,11 @@ def create_silver(
         {}
     )
 
+    gate_enabled = gate.get(
+        "enabled",
+        True
+    )
+
     minimum_score = float(
         gate.get(
             "silver_min_score",
@@ -239,24 +407,38 @@ def create_silver(
         "silver_schema"
     ]
 
-    silver_table = (
-        f"{catalog}."
-        f"{silver_schema}."
-        f"{table}"
-    )
-
     if (
-        gate.get("enabled", True)
-        and score < minimum_score
+        gate_enabled
+        and float(score) < minimum_score
     ):
 
+        print()
         print(
-            f"Silver BLOCKED | "
-            f"Score={score} | "
-            f"Required={minimum_score}"
+            "SILVER QUALITY GATE: BLOCKED"
+        )
+
+        print(
+            f"Score    : {score}"
+        )
+
+        print(
+            f"Required : {minimum_score}"
         )
 
         return False
+
+    print()
+    print(
+        "SILVER QUALITY GATE: PASSED"
+    )
+
+    print(
+        f"Score    : {score}"
+    )
+
+    print(
+        f"Required : {minimum_score}"
+    )
 
     metadata_columns = [
         "_dq_ingestion_timestamp",
@@ -275,30 +457,26 @@ def create_silver(
         *columns_to_drop
     )
 
-    (
-        silver_df.write
-        .format("delta")
-        .mode("overwrite")
-        .option(
-            "overwriteSchema",
-            "true"
-        )
-        .saveAsTable(
-            full_table_name(
-                catalog,
-                silver_schema,
-                table
-            )
-        )
+    write_delta_table(
+        silver_df,
+        spark,
+        catalog,
+        silver_schema,
+        table,
+        mode="overwrite"
     )
 
     print(
         f"Silver CREATED: "
-        f"{silver_table}"
+        f"{catalog}.{silver_schema}.{table}"
     )
 
     return True
 
+
+# ============================================================
+# CREATE GOLD
+# ============================================================
 
 def create_gold(
     spark,
@@ -321,77 +499,68 @@ def create_gold(
         "gold_schema"
     ]
 
-    silver_table = (
-        f"{catalog}."
-        f"{silver_schema}."
-        f"{table}"
-    )
-
-    gold_table = (
-        f"{catalog}."
-        f"{gold_schema}."
-        f"{table}"
-    )
-
-    if not spark.catalog.tableExists(
-        silver_table
+    if not table_exists(
+        spark,
+        catalog,
+        silver_schema,
+        table
     ):
 
         print(
-            f"Silver does not exist: "
-            f"{silver_table}"
+            f"Gold BLOCKED: Silver does not exist."
         )
 
         return False
 
+    silver_name = full_table_name(
+        catalog,
+        silver_schema,
+        table
+    )
+
     df = spark.table(
-        full_table_name(
-            catalog,
-            silver_schema,
-            table
-        )
+        silver_name
     )
 
     gold_df = (
         df
+
         .withColumn(
             "_dq_quality_score",
             F.lit(float(score))
         )
+
         .withColumn(
             "_dq_overall_status",
             F.lit(status)
         )
+
         .withColumn(
             "_dq_gold_timestamp",
             F.current_timestamp()
         )
     )
 
-    (
-        gold_df.write
-        .format("delta")
-        .mode("overwrite")
-        .option(
-            "overwriteSchema",
-            "true"
-        )
-        .saveAsTable(
-            full_table_name(
-                catalog,
-                gold_schema,
-                table
-            )
-        )
+    write_delta_table(
+        gold_df,
+        spark,
+        catalog,
+        gold_schema,
+        table,
+        mode="overwrite"
     )
 
     print(
         f"Gold CREATED: "
-        f"{gold_table}"
+        f"{catalog}.{gold_schema}.{table}"
     )
 
     return True
 
+
+# ============================================================
+# CREATE QUARANTINE
+# ============================================================
 
 def create_quarantine(
     spark,
@@ -418,24 +587,28 @@ def create_quarantine(
         "quarantine_schema"
     ]
 
-    quarantine_table_name = (
-        f"quarantine_"
-        f"{safe_column_name(table)}"
+    quarantine_table = (
+        "quarantine_"
+        + safe_column_name(table)
     )
 
     quarantine_df = (
         df
+
         .filter(condition)
+
         .withColumn(
             "_dq_run_id",
             F.lit(run_id)
         )
+
         .withColumn(
             "_dq_source_table",
             F.lit(
                 f"{catalog}.{schema}.{table}"
             )
         )
+
         .withColumn(
             "_dq_quarantine_timestamp",
             F.current_timestamp()
@@ -452,17 +625,13 @@ def create_quarantine(
 
         return 0
 
-    (
-        quarantine_df.write
-        .format("delta")
-        .mode("append")
-        .saveAsTable(
-            full_table_name(
-                catalog,
-                quarantine_schema,
-                quarantine_table_name
-            )
-        )
+    write_delta_table(
+        quarantine_df,
+        spark,
+        catalog,
+        quarantine_schema,
+        quarantine_table,
+        mode="append"
     )
 
     print(
@@ -470,3 +639,46 @@ def create_quarantine(
     )
 
     return count
+
+
+# ============================================================
+# TABLE EXISTS
+# ============================================================
+
+def table_exists(
+    spark,
+    catalog,
+    schema,
+    table
+):
+
+    validate_unity_catalog(
+        spark,
+        catalog
+    )
+
+    table_name = full_table_name(
+        catalog,
+        schema,
+        table
+    )
+
+    try:
+
+        return spark.catalog.tableExists(
+            table_name
+        )
+
+    except Exception:
+
+        try:
+
+            spark.table(
+                table_name
+            )
+
+            return True
+
+        except Exception:
+
+            return False
