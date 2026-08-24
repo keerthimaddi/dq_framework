@@ -1731,3 +1731,30 @@ def run_all_dq(
         })
 
     return results, details
+
+# ============================================================
+# OVERALL STATUS
+# ============================================================
+
+def overall_status(
+    score,
+    thresholds
+):
+
+    score = float(score)
+
+    pass_threshold = float(
+        thresholds.get("pass", 90)
+    )
+
+    warning_threshold = float(
+        thresholds.get("warning", 75)
+    )
+
+    if score >= pass_threshold:
+        return "GOOD"
+
+    if score >= warning_threshold:
+        return "WARNING"
+
+    return "FAIL"
