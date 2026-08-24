@@ -349,55 +349,6 @@ table_rules:
     date_columns: []
 
 
-relationships:
-
-  - name: campaign_master_fk
-    child_table: wmg.demo.campaign_data
-    child_column: campaign_id
-    parent_table: wmg.demo.campaign_master
-    parent_column: campaign_id
-    nullable_allowed: false
-
-
-profiling:
-
-  enabled: true
-  top_values: 10
-  candidate_null_rate_pct: 1
-
-
-ml_weighting:
-
-  enabled: true
-
-  incident_table: wmg.demo.incident_history
-
-  feature_columns:
-    - incident_count
-    - avg_mttd_minutes
-    - avg_mtta_minutes
-    - avg_mttr_minutes
-    - aidr_pct
-    - severity_score
-
-  target_column: total_rev_impact
-
-  output_table: wmg.dqx_audit.dq_dynamic_weights
-
-  min_training_rows: 10
-
-
-output_tables:
-
-  audit: dq_audit_results
-  summary: dq_summary
-  quarantine: dq_quarantine
-  profiling: dq_profile
-  candidates: dq_rule_candidates
-  kpi: dq_kpis
-  weights: dq_dynamic_weights
-  pipeline_runs: dq_pipeline_runs
-
   wmg.demo.transactions:
 
     unique_keys:
@@ -471,7 +422,7 @@ output_tables:
         min: 1
         max: 100
 
-    pattern_rules: { }
+    pattern_rules: {}
 
     conformity_rules:
 
@@ -481,13 +432,12 @@ output_tables:
 
       amount_non_negative: "amount >= 0"
 
-    consistency_rules: { }
+    consistency_rules: {}
 
-    business_rules: { }
+    business_rules: {}
 
     date_columns:
       - transaction_date
-
 
 
   wmg.demo.emea_and_global_data_combined_2_1:
@@ -644,3 +594,159 @@ output_tables:
 
     date_columns:
       - Day
+
+
+relationships:
+
+  - name: campaign_master_fk
+    child_table: wmg.demo.campaign_data
+    child_column: campaign_id
+    parent_table: wmg.demo.campaign_master
+    parent_column: campaign_id
+    nullable_allowed: false
+
+
+profiling:
+
+  enabled: true
+  top_values: 10
+  candidate_null_rate_pct: 1
+
+
+# ============================================================
+# KPI METRICS
+# ============================================================
+
+kpi_metrics:
+
+  enabled: true
+
+  # Source table created by create_incident_log.sql
+  incident_log_table: "wmg.dqx_audit.dq_incident_log"
+
+  # Severity calculation:
+  # severity_score =
+  #     duration_weight * norm(mttr)
+  #   + revenue_weight * norm(rev_impact)
+  #
+  # These values must add up to 1.0.
+  severity_weights:
+    duration_weight: 0.5
+    revenue_weight: 0.5
+
+  # ----------------------------------------------------------
+  # INCIDENT LABEL → KPI MAPPING
+  # ----------------------------------------------------------
+  #
+  # IMPORTANT:
+  # Review these labels against the actual labels in your
+  # dq_incident_log table before running the pipeline.
+  #
+  # Anything not listed here will use default_kpi.
+  # ----------------------------------------------------------
+
+  label_kpi_map:
+
+    "Null Primary Keys":
+      kpi: "K01"
+      kpi_name: "Completeness"
+      dimension: "Bronze / Raw"
+
+    "Data Quality Breach":
+      kpi: "K01"
+      kpi_name: "Completeness"
+      dimension: "Bronze / Raw"
+
+    "FK Mismatch":
+      kpi: "K06"
+      kpi_name: "Integrity"
+      dimension: "Silver / Clean"
+
+    "Duplicate Check Failure":
+      kpi: "K10"
+      kpi_name: "Duplicate"
+      dimension: "Silver / Clean"
+
+    "Format/Regex Failure":
+      kpi: "K03"
+      kpi_name: "Validity"
+      dimension: "Silver / Clean"
+
+    "Type Conversion Error":
+      kpi: "K13"
+      kpi_name: "Data Type"
+      dimension: "Bronze / Raw"
+
+    "Code Failure / Schema Shift":
+      kpi: "K04"
+      kpi_name: "Availability"
+      dimension: "Pipeline Engine"
+
+    "Network / Timeout":
+      kpi: "K04"
+      kpi_name: "Availability"
+      dimension: "Pipeline Engine"
+
+    "Resource Contention":
+      kpi: "K07"
+      kpi_name: "Timeliness"
+      dimension: "Gold / Layer"
+
+    "SLA Latency Breach":
+      kpi: "K07"
+      kpi_name: "Timeliness"
+      dimension: "Gold / Layer"
+
+  # If an incident label doesn't appear above,
+  # it will be classified here.
+  default_kpi:
+    kpi: "K99"
+    kpi_name: "Unclassified"
+    dimension: "Unknown"
+
+
+# ============================================================
+# EXISTING ML WEIGHTING
+# ============================================================
+#
+# DO NOT CHANGE THIS BLOCK at this stage.
+# It continues to use wmg.demo.incident_history.
+#
+# The existing src/ml_weighting.py will be handled separately.
+# ============================================================
+
+ml_weighting:
+
+  enabled: true
+
+  incident_table: wmg.demo.incident_history
+
+  feature_columns:
+    - incident_count
+    - avg_mttd_minutes
+    - avg_mtta_minutes
+    - avg_mttr_minutes
+    - aidr_pct
+    - severity_score
+
+  target_column: total_rev_impact
+
+  output_table: wmg.dqx_audit.dq_dynamic_weights
+
+  min_training_rows: 10
+
+
+# ============================================================
+# OUTPUT TABLES
+# ============================================================
+
+output_tables:
+
+  audit: dq_audit_results
+  summary: dq_summary
+  quarantine: dq_quarantine
+  profiling: dq_profile
+  candidates: dq_rule_candidates
+  kpi: dq_kpis
+  weights: dq_dynamic_weights
+  pipeline_runs: dq_pipeline_runs

@@ -9,8 +9,7 @@ from datetime import datetime
 from pyspark.sql import SparkSession
 
 from src.rule_loader import load_config
-from src.metadata_discovery import discover_tables
-
+from src.metadata_discovery import discover_source_tables
 from src.dq_engine import (
     run_all_dq,
     calculate_score,
@@ -38,9 +37,11 @@ from src.lakehouse import (
 
 from src.quarantine_rules import build_failure_condition
 
+from src.auto_rules import build_auto_rule, merge_rules
+
 from src.ml_weighting import train_dynamic_weights
 
-from src.auto_rules import build_auto_rule, merge_rules
+from src.kpi_metrics import run_kpi_metrics, compute_kpi_weights
 
 
 # ============================================================
@@ -118,9 +119,15 @@ def process_table(spark, cfg, catalog, schema, table):
     print()
     print("Running data profiling...")
 
+    null_threshold = (
+        cfg.get("profiling", {}).get("candidate_null_rate_pct", 1.0)
+    )
+
     try:
         profile_rows = profile_table(df, catalog, schema, table)
-        candidate_rows = create_rule_candidates(profile_rows)
+        candidate_rows = create_rule_candidates(
+            profile_rows, null_threshold=null_threshold
+        )
 
         print(f"Profile rows    : {len(profile_rows)}")
         print(f"Rule candidates : {len(candidate_rows)}")
@@ -207,9 +214,6 @@ def process_table(spark, cfg, catalog, schema, table):
 
     # --------------------------------------------------------
     # QUALITY GATE
-    # NOTE: uses silver_min_score, matching dq_rules.yml.
-    # (Previously read "threshold", which doesn't exist in the
-    # YAML and always evaluated to 0 - that bug is fixed here.)
     # --------------------------------------------------------
     quality_gate = cfg["quality_gate"]
 
@@ -357,9 +361,29 @@ def main():
     create_framework_schemas(spark, cfg)
 
     # --------------------------------------------------------
+    # KPI METRICS (Requirement 02, Steps 1-3)
+    # Runs BEFORE discovery on purpose: this MERGEs fresh
+    # MTTD/MTTA/MTTR/AIDR rows into wmg.demo.incident_history,
+    # so the table-discovery loop right after this picks up
+    # and DQ-checks the UPDATED incident_history, not stale
+    # data from the previous run. Non-fatal: if the raw
+    # incident log isn't populated yet, this is a safe no-op
+    # and the rest of the pipeline still runs.
+    # --------------------------------------------------------
+    print()
+    print("=" * 70)
+    print("KPI METRICS")
+    print("=" * 70)
+
+    try:
+        run_kpi_metrics(spark, cfg)
+    except Exception as exc:
+        print(f"KPI metrics step failed (non-fatal): {exc}")
+
+    # --------------------------------------------------------
     # DISCOVER TABLES
     # --------------------------------------------------------
-    tables = discover_tables(spark, cfg)
+    tables = discover_source_tables(spark, cfg)
 
     if not tables:
         print()
@@ -447,9 +471,7 @@ def main():
             print(f"Candidate write failed: {exc}")
 
     # --------------------------------------------------------
-    # ML DYNAMIC WEIGHTING
-    # (trains against incident_history; safe no-op if disabled
-    # or if there isn't enough history yet)
+    # ML DYNAMIC WEIGHTING - Stage A (per-metric importances)
     # --------------------------------------------------------
     print()
     print("=" * 70)
@@ -460,6 +482,20 @@ def main():
         train_dynamic_weights(spark, cfg, cfg["framework"]["catalog"])
     except Exception as exc:
         print(f"ML weighting step failed (non-fatal): {exc}")
+
+    # --------------------------------------------------------
+    # KPI DYNAMIC WEIGHTS - Stage B (per-KPI W1..Wn, whiteboard
+    # shape) + final KPI report
+    # --------------------------------------------------------
+    print()
+    print("=" * 70)
+    print("KPI DYNAMIC WEIGHTS + REPORT")
+    print("=" * 70)
+
+    try:
+        compute_kpi_weights(spark, cfg)
+    except Exception as exc:
+        print(f"KPI weighting/report step failed (non-fatal): {exc}")
 
     # --------------------------------------------------------
     # FINAL REPORT

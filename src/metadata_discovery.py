@@ -78,9 +78,8 @@ def list_tables_in_schema(
     """
     Discover all tables/views available inside a schema.
 
-    (Renamed from the old `discover_tables` to avoid clashing with
-    the flat-list, config-driven `discover_tables(spark, cfg)` below,
-    which is what src/main.py actually calls.)
+    This function is responsible for discovering table names
+    inside ONE schema.
     """
 
     try:
@@ -124,10 +123,9 @@ def discover_all_metadata(
             -> schema
                 -> table
 
-    Across ALL catalogs the identity can see. Returns one dict per
-    table. Useful for exploration; src/main.py does not call this
-    by default (it targets a single configured catalog - see
-    discover_tables below).
+    Across ALL catalogs the identity can see.
+
+    Returns one dictionary per table.
     """
 
     discovered = []
@@ -196,18 +194,16 @@ def discover_tables(
     cfg: Dict[str, Any]
 ) -> List[Tuple[str, str, str]]:
     """
-    THIS is what src/main.py calls.
-
     Discovers every schema and table inside the single catalog
-    configured in dq_rules.yml (framework.catalog), excluding
-    information_schema and the framework's own dqx_* schemas plus
-    anything listed under framework.excluded_schemas in the YAML.
+    configured in dq_rules.yml (framework.catalog).
 
-    Nothing here is hardcoded to a specific schema or table name -
-    add a new schema/table under the configured catalog and it is
-    picked up automatically on the next run.
+    Excludes:
+        - information_schema
+        - framework dqx_* schemas
+        - schemas listed under framework.excluded_schemas
 
-    Returns a flat list of (catalog, schema, table) tuples.
+    Returns:
+        List of (catalog, schema, table) tuples.
     """
 
     framework = cfg.get("framework", {})
@@ -215,10 +211,14 @@ def discover_tables(
 
     if not catalog:
         raise ValueError(
-            "cfg['framework']['catalog'] is required for discover_tables()"
+            "cfg['framework']['catalog'] is required "
+            "for discover_tables()"
         )
 
-    excluded_schemas = framework.get("excluded_schemas", [])
+    excluded_schemas = framework.get(
+        "excluded_schemas",
+        []
+    )
 
     print("\n" + "=" * 70)
     print("DATABRICKS CATALOG DISCOVERY")
@@ -245,16 +245,25 @@ def discover_tables(
         )
 
         for table in tables:
-            discovered.append((catalog, schema, table))
+            discovered.append(
+                (catalog, schema, table)
+            )
 
     print("\n" + "=" * 70)
     print("DISCOVERED TABLES")
     print("=" * 70)
 
     for catalog_name, schema_name, table_name in discovered:
-        print(f"{catalog_name}.{schema_name}.{table_name}")
+        print(
+            f"{catalog_name}."
+            f"{schema_name}."
+            f"{table_name}"
+        )
 
-    print(f"\nTotal Tables Found: {len(discovered)}")
+    print(
+        f"\nTotal Tables Found: "
+        f"{len(discovered)}"
+    )
 
     return discovered
 
@@ -287,3 +296,103 @@ def get_table_dataframe(
     return spark.table(
         f"`{catalog}`.`{schema}`.`{table}`"
     )
+
+
+# ============================================================
+# SOURCE TABLE DISCOVERY
+# ============================================================
+#
+# Used by main.py when we want to discover only the configured
+# source schemas.
+#
+# Returns:
+#
+#     (catalog, schema, table)
+#
+# tuples, which main.py can safely unpack as:
+#
+#     for catalog, schema, table in tables:
+#
+# ============================================================
+
+def discover_source_tables(
+    spark: SparkSession,
+    cfg: Dict[str, Any]
+) -> List[Tuple[str, str, str]]:
+    """
+    Discover source tables under framework.catalog.
+
+    If framework.source_schema_allowlist is configured,
+    only schemas in that allowlist are scanned.
+
+    framework.excluded_schemas is also respected.
+
+    Returns:
+        A flat list of:
+            (catalog, schema, table)
+        tuples.
+    """
+
+    framework = cfg.get("framework", {})
+
+    catalog = framework.get("catalog")
+
+    if not catalog:
+        raise ValueError(
+            "cfg['framework']['catalog'] is required "
+            "for discover_source_tables()"
+        )
+
+    excluded_schemas = framework.get(
+        "excluded_schemas",
+        []
+    )
+
+    allowlist = framework.get(
+        "source_schema_allowlist"
+    )
+
+    # Discover schemas while respecting the framework's
+    # excluded schema configuration.
+    schemas = discover_schemas(
+        spark,
+        catalog,
+        excluded_schemas
+    )
+
+    # If an allowlist exists, restrict discovery to only
+    # those schemas.
+    if allowlist:
+        schemas = [
+            schema
+            for schema in schemas
+            if schema in allowlist
+        ]
+
+    result: List[Tuple[str, str, str]] = []
+
+    # Discover tables inside each selected schema.
+    for schema in schemas:
+
+        tables = list_tables_in_schema(
+            spark,
+            catalog,
+            schema
+        )
+
+        for table in tables:
+            result.append(
+                (
+                    catalog,
+                    schema,
+                    table
+                )
+            )
+
+    print(
+        f"Source tables discovered: "
+        f"{len(result)} "
+        f"(catalog={catalog}, schemas={schemas})"
+    )
+
+    return result
