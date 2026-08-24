@@ -397,3 +397,250 @@ output_tables:
   kpi: dq_kpis
   weights: dq_dynamic_weights
   pipeline_runs: dq_pipeline_runs
+
+  wmg.demo.transactions:
+
+    unique_keys:
+      - transaction_id
+
+    mandatory_columns:
+      - transaction_id
+      - customer_id
+      - transaction_date
+      - amount
+      - transaction_type
+      - currency
+      - transaction_status
+      - order_id
+      - region
+      - risk_level
+
+    null_columns:
+      - transaction_id
+      - customer_id
+      - transaction_date
+      - amount
+      - transaction_type
+      - currency
+      - transaction_status
+      - order_id
+
+    expected_types:
+      transaction_id: string
+      customer_id: string
+      transaction_date: string
+      amount: double
+      transaction_type: string
+      currency: string
+      source: string
+      channel: string
+      transaction_status: string
+      order_id: string
+      region: string
+      risk_level: string
+
+    allowed_values:
+
+      transaction_status:
+        - SUCCESS
+        - FAILED
+        - PENDING
+        - CANCELLED
+
+      risk_level:
+        - LOW
+        - MEDIUM
+        - HIGH
+
+    range_rules:
+
+      amount:
+        min: 0
+
+    length_rules:
+
+      transaction_id:
+        min: 1
+        max: 100
+
+      customer_id:
+        min: 1
+        max: 100
+
+      order_id:
+        min: 1
+        max: 100
+
+    pattern_rules: { }
+
+    conformity_rules:
+
+      amount_non_negative: "amount >= 0"
+
+    row_expressions:
+
+      amount_non_negative: "amount >= 0"
+
+    consistency_rules: { }
+
+    business_rules: { }
+
+    date_columns:
+      - transaction_date
+
+
+
+  wmg.demo.emea_and_global_data_combined_2_1:
+
+    unique_keys: []
+
+    mandatory_columns:
+      - Campaign name
+      - Ad set name
+      - Ad name
+      - Day
+      - Delivery status
+      - Delivery level
+      - Amount spent (USD)
+      - Impressions
+      - Platform
+      - Region
+      - Market
+
+    null_columns:
+      - Campaign name
+      - Ad set name
+      - Ad name
+      - Day
+      - Amount spent (USD)
+      - Impressions
+      - Platform
+      - Region
+      - Market
+
+    expected_types:
+
+      Campaign name: string
+      Ad set name: string
+      Ad name: string
+      Day: date
+      Delivery status: string
+      Delivery level: string
+      Attribution setting: string
+      Result type: string
+      Results: bigint
+      Reach: bigint
+      Frequency: double
+      Cost per result: double
+      Amount spent (USD): double
+      Quality ranking: string
+      Engagement rate ranking: string
+      Conversion rate ranking: string
+      Impressions: bigint
+      CPM: double
+      Link clicks: bigint
+      Shop clicks: bigint
+      CPC: double
+      CTR: double
+      Landing page views: bigint
+      Cost per landing page view: double
+      Post engagements: bigint
+      Cost per Page engagement: double
+      Campaign Budget: double
+      Campaign Budget Type: string
+      Ad Set Budget: string
+      Ad Set Budget Type: string
+      Post reactions: bigint
+      Post shares: bigint
+      Post comments: bigint
+      Post saves: bigint
+      Cost per post engagement: double
+      ThruPlays: bigint
+      Platform: string
+      Region: string
+      Market: string
+      Artist: string
+      ACID: string
+      Audience Type: string
+      Optimization: string
+      Age Group: string
+      Placement: string
+      Campaign: string
+      Creative_Type: string
+
+    allowed_values: {}
+
+    range_rules:
+
+      Results:
+        min: 0
+
+      Reach:
+        min: 0
+
+      Frequency:
+        min: 0
+
+      Amount spent (USD):
+        min: 0
+
+      Impressions:
+        min: 0
+
+      Link clicks:
+        min: 0
+
+      Shop clicks:
+        min: 0
+
+      CTR:
+        min: 0
+
+      Post engagements:
+        min: 0
+
+      Post reactions:
+        min: 0
+
+      Post shares:
+        min: 0
+
+      Post comments:
+        min: 0
+
+      Post saves:
+        min: 0
+
+      ThruPlays:
+        min: 0
+
+    length_rules:
+
+      Campaign name:
+        min: 1
+        max: 500
+
+      Ad set name:
+        min: 1
+        max: 500
+
+      Ad name:
+        min: 1
+        max: 500
+
+    pattern_rules: {}
+
+    conformity_rules:
+
+      spend_non_negative: "`Amount spent (USD)` >= 0"
+
+    row_expressions:
+
+      spend_non_negative: "`Amount spent (USD)` >= 0"
+
+    consistency_rules: {}
+
+    business_rules: {}
+
+    date_columns:
+      - Day

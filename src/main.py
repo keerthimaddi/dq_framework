@@ -40,6 +40,8 @@ from src.quarantine_rules import build_failure_condition
 
 from src.ml_weighting import train_dynamic_weights
 
+from src.auto_rules import build_auto_rule, merge_rules
+
 
 # ============================================================
 # SPARK SESSION
@@ -139,13 +141,45 @@ def process_table(spark, cfg, catalog, schema, table):
     )
 
     # --------------------------------------------------------
+    # BUILD EFFECTIVE RULE: AUTO (metadata-derived) + MANUAL
+    # (optional table_rules entry in dq_rules.yml, if present)
+    # --------------------------------------------------------
+    print()
+    print("Deriving DQ rules from table metadata...")
+
+    auto_rule = build_auto_rule(spark, bronze_df, catalog, schema, table, cfg)
+    manual_rule = get_table_rule(cfg, catalog, schema, table)
+    effective_rule = merge_rules(auto_rule, manual_rule)
+
+    print(
+        f"Auto-derived: "
+        f"{len(auto_rule.get('mandatory_columns', []))} mandatory cols, "
+        f"{len(auto_rule.get('unique_keys', []))} key candidate(s), "
+        f"{len(auto_rule.get('range_rules', {}))} numeric range rule(s), "
+        f"{len(auto_rule.get('pattern_rules', {}))} pattern rule(s)"
+        + (
+            " | manual overrides applied"
+            if manual_rule
+            else " | no manual table_rules entry (fully automatic)"
+        )
+    )
+
+    # cfg is reused across tables in the discovery loop, so scope
+    # the injected rule to THIS table only via a shallow copy.
+    table_cfg = dict(cfg)
+    table_cfg["table_rules"] = {
+        **cfg.get("table_rules", {}),
+        source: effective_rule,
+    }
+
+    # --------------------------------------------------------
     # RUN DQ CHECKS (against Bronze)
     # --------------------------------------------------------
     print()
     print("Running DQ01 - DQ16...")
 
     results, details = run_all_dq(
-        spark, bronze_df, catalog, schema, table, cfg
+        spark, bronze_df, catalog, schema, table, table_cfg
     )
 
     print()
@@ -201,8 +235,7 @@ def process_table(spark, cfg, catalog, schema, table):
     print()
     print("Evaluating rows for quarantine...")
 
-    table_rule = get_table_rule(cfg, catalog, schema, table)
-    failure_condition = build_failure_condition(bronze_df, table_rule)
+    failure_condition = build_failure_condition(bronze_df, effective_rule)
 
     quarantined_count = create_quarantine(
         spark,

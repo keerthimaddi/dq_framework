@@ -1,255 +1,104 @@
 # ============================================================
-# RULE LOADER
+# DYNAMIC RULE CONFIGURATION LOADER
 # ============================================================
 
 from pathlib import Path
+from typing import Dict, Any
+
 import yaml
 
 
-EXPECTED_DQ_IDS = [
-    f"DQ{i:02d}"
-    for i in range(1, 17)
-]
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = PROJECT_ROOT / "config"
+RULE_FILE = CONFIG_DIR / "dq_rules.yml"
 
 
-def find_config():
+def load_config() -> Dict[str, Any]:
+    """
+    Load the DQ framework configuration.
 
-    candidates = [
+    The configuration is optional for table discovery.
+    Discovery itself remains dynamic.
+    """
 
-        Path("dq_rules.yml"),
-
-        Path("config/dq_rules.yml"),
-
-        Path("../dq_rules.yml"),
-
-        Path("../config/dq_rules.yml"),
-
-        Path("../../dq_rules.yml"),
-
-        Path(__file__).resolve().parents[1]
-        / "dq_rules.yml",
-
-    ]
-
-    for path in candidates:
-
-        if path.exists():
-
-            return path.resolve()
-
-    raise FileNotFoundError(
-        "Could not find dq_rules.yml. "
-        "Expected it in project root or config/."
-    )
-
-
-def load_config():
-
-    config_path = find_config()
-
-    print()
-    print("=" * 70)
-    print("LOADING DQ RULES")
-    print("=" * 70)
-
-    print(
-        f"Configuration: {config_path}"
-    )
+    if not RULE_FILE.exists():
+        raise FileNotFoundError(
+            f"DQ configuration not found: {RULE_FILE}"
+        )
 
     with open(
-        config_path,
+        RULE_FILE,
         "r",
         encoding="utf-8"
     ) as file:
 
-        cfg = yaml.safe_load(file)
+        config = yaml.safe_load(file) or {}
 
-    if not cfg:
+    return config
 
-        raise ValueError(
-            "dq_rules.yml is empty."
-        )
 
-    required_sections = [
+def get_framework_config(
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
 
+    return config.get(
         "framework",
+        {}
+    )
 
-        "overall_thresholds",
 
-        "quality_gate",
+def get_dq_rules(
+    config: Dict[str, Any]
+):
 
+    return config.get(
         "dq_rules",
+        []
+    )
 
+
+def get_quality_gate(
+    config: Dict[str, Any]
+):
+
+    return config.get(
+        "quality_gate",
+        {}
+    )
+
+
+def get_overall_thresholds(
+    config: Dict[str, Any]
+):
+
+    return config.get(
+        "overall_thresholds",
+        {
+            "pass": 90,
+            "warning": 75,
+            "fail": 0,
+        }
+    )
+
+
+def get_table_rules(
+    config: Dict[str, Any]
+):
+
+    return config.get(
         "table_rules",
-
-        "relationships",
-
-        "profiling",
-
-        "ml_weighting",
-
-        "output_tables",
-
-    ]
-
-    for section in required_sections:
-
-        if section not in cfg:
-
-            raise ValueError(
-                f"Missing YAML section: "
-                f"{section}"
-            )
-
-    # --------------------------------------------------------
-    # DQ RULES
-    # --------------------------------------------------------
-
-    rules = cfg[
-        "dq_rules"
-    ]
-
-    if not isinstance(
-        rules,
-        list
-    ):
-
-        raise ValueError(
-            "dq_rules must be a list."
-        )
-
-    if len(rules) != 16:
-
-        raise ValueError(
-            "Exactly 16 DQ rules are required. "
-            f"Found {len(rules)}."
-        )
-
-    actual_ids = [
-        rule.get("id")
-        for rule in rules
-    ]
-
-    if actual_ids != EXPECTED_DQ_IDS:
-
-        raise ValueError(
-            "DQ rule IDs must be exactly: "
-            + ", ".join(
-                EXPECTED_DQ_IDS
-            )
-        )
-
-    # --------------------------------------------------------
-    # WEIGHTS
-    # --------------------------------------------------------
-
-    enabled_weight = 0.0
-
-    for rule in rules:
-
-        dq_id = rule["id"]
-
-        enabled = rule.get(
-            "enabled",
-            True
-        )
-
-        weight = float(
-            rule.get(
-                "default_weight",
-                0
-            )
-        )
-
-        if weight < 0:
-
-            raise ValueError(
-                f"{dq_id} has negative weight."
-            )
-
-        if enabled:
-
-            enabled_weight += weight
-
-    if abs(
-        enabled_weight - 100.0
-    ) > 0.01:
-
-        raise ValueError(
-            "Enabled DQ weights must total 100. "
-            f"Found {enabled_weight}."
-        )
-
-    # --------------------------------------------------------
-    # THRESHOLDS
-    # --------------------------------------------------------
-
-    thresholds = cfg[
-        "overall_thresholds"
-    ]
-
-    if "pass" not in thresholds:
-
-        raise ValueError(
-            "overall_thresholds.pass is required."
-        )
-
-    if "warning" not in thresholds:
-
-        raise ValueError(
-            "overall_thresholds.warning is required."
-        )
-
-    if float(
-        thresholds["pass"]
-    ) <= float(
-        thresholds["warning"]
-    ):
-
-        raise ValueError(
-            "PASS threshold must be greater "
-            "than WARNING threshold."
-        )
-
-    # --------------------------------------------------------
-    # FRAMEWORK
-    # --------------------------------------------------------
-
-    framework = cfg[
-        "framework"
-    ]
-
-    required_framework = [
-        "catalog",
-        "audit_schema",
-        "candidate_schema",
-    ]
-
-    for key in required_framework:
-
-        if key not in framework:
-
-            raise ValueError(
-                f"framework.{key} is required."
-            )
-
-    print(
-        f"Loaded {len(rules)} DQ rules"
+        {}
     )
 
-    print(
-        f"Enabled weight: "
-        f"{enabled_weight}"
-    )
 
-    print(
-        f"Overall PASS threshold: "
-        f"{thresholds['pass']}"
-    )
+def get_table_rule(
+    config: Dict[str, Any],
+    full_table_name: str
+) -> Dict[str, Any]:
 
-    print(
-        f"Overall WARNING threshold: "
-        f"{thresholds['warning']}"
-    )
+    table_rules = get_table_rules(config)
 
-    return cfg
+    return table_rules.get(
+        full_table_name,
+        {}
+    )
