@@ -1,152 +1,289 @@
 # ============================================================
-# METADATA DISCOVERY
+# DYNAMIC METADATA DISCOVERY
 # ============================================================
 
+from typing import List, Dict, Any, Tuple
 from pyspark.sql import SparkSession
 
 
-def quote_identifier(identifier):
+# Framework/system schemas that should normally not be scanned
+DEFAULT_EXCLUDED_SCHEMAS = {
+    "information_schema",
+    "dqx_bronze",
+    "dqx_silver",
+    "dqx_gold",
+    "dqx_audit",
+    "dqx_quarantine",
+    "dqx_profiling",
+}
 
-    return (
-        "`"
-        + str(identifier).replace("`", "``")
-        + "`"
+
+def discover_catalogs(
+    spark: SparkSession,
+    excluded_catalogs: List[str] | None = None
+) -> List[str]:
+    """
+    Discover all catalogs accessible to the current Databricks identity.
+    """
+
+    excluded_catalogs = set(excluded_catalogs or [])
+
+    rows = spark.sql("SHOW CATALOGS").collect()
+
+    catalogs = []
+
+    for row in rows:
+        catalog = row[0]
+
+        if catalog not in excluded_catalogs:
+            catalogs.append(catalog)
+
+    return sorted(catalogs)
+
+
+def discover_schemas(
+    spark: SparkSession,
+    catalog: str,
+    excluded_schemas: List[str] | None = None
+) -> List[str]:
+    """
+    Discover all schemas inside a catalog.
+    """
+
+    excluded = DEFAULT_EXCLUDED_SCHEMAS.copy()
+
+    if excluded_schemas:
+        excluded.update(excluded_schemas)
+
+    rows = spark.sql(
+        f"SHOW SCHEMAS IN `{catalog}`"
+    ).collect()
+
+    schemas = []
+
+    for row in rows:
+        schema = row[0]
+
+        if schema not in excluded:
+            schemas.append(schema)
+
+    return sorted(schemas)
+
+
+def list_tables_in_schema(
+    spark: SparkSession,
+    catalog: str,
+    schema: str
+) -> List[str]:
+    """
+    Discover all tables/views available inside a schema.
+
+    (Renamed from the old `discover_tables` to avoid clashing with
+    the flat-list, config-driven `discover_tables(spark, cfg)` below,
+    which is what src/main.py actually calls.)
+    """
+
+    try:
+        rows = spark.sql(
+            f"SHOW TABLES IN `{catalog}`.`{schema}`"
+        ).collect()
+
+    except Exception as exc:
+        print(
+            f"WARNING: Could not inspect "
+            f"{catalog}.{schema}: {exc}"
+        )
+        return []
+
+    tables = []
+
+    for row in rows:
+        table_name = row[1]
+
+        # Temporary objects are not part of framework discovery
+        is_temporary = False
+
+        if len(row) >= 4:
+            is_temporary = bool(row[3])
+
+        if not is_temporary:
+            tables.append(table_name)
+
+    return sorted(tables)
+
+
+def discover_all_metadata(
+    spark: SparkSession,
+    excluded_catalogs: List[str] | None = None,
+    excluded_schemas: List[str] | None = None,
+) -> List[Dict[str, Any]]:
+    """
+    Discover:
+
+        catalog
+            -> schema
+                -> table
+
+    Across ALL catalogs the identity can see. Returns one dict per
+    table. Useful for exploration; src/main.py does not call this
+    by default (it targets a single configured catalog - see
+    discover_tables below).
+    """
+
+    discovered = []
+
+    catalogs = discover_catalogs(
+        spark,
+        excluded_catalogs
     )
 
+    print("\n" + "=" * 70)
+    print("DYNAMIC METADATA DISCOVERY")
+    print("=" * 70)
 
-def full_table_name(
-    catalog,
-    schema,
-    table
-):
+    print(f"Catalogs discovered: {len(catalogs)}")
 
-    return (
-        f"{quote_identifier(catalog)}."
-        f"{quote_identifier(schema)}."
-        f"{quote_identifier(table)}"
+    for catalog in catalogs:
+
+        print(f"\nCatalog: {catalog}")
+
+        schemas = discover_schemas(
+            spark,
+            catalog,
+            excluded_schemas
+        )
+
+        print(f"  Schemas discovered: {len(schemas)}")
+
+        for schema in schemas:
+
+            tables = list_tables_in_schema(
+                spark,
+                catalog,
+                schema
+            )
+
+            print(
+                f"    {schema}: "
+                f"{len(tables)} tables"
+            )
+
+            for table in tables:
+
+                full_name = (
+                    f"{catalog}.{schema}.{table}"
+                )
+
+                discovered.append(
+                    {
+                        "catalog": catalog,
+                        "schema": schema,
+                        "table": table,
+                        "full_name": full_name,
+                    }
+                )
+
+    print(
+        f"\nTOTAL TABLES DISCOVERED: "
+        f"{len(discovered)}"
     )
+
+    return discovered
 
 
 def discover_tables(
     spark: SparkSession,
-    cfg
-):
+    cfg: Dict[str, Any]
+) -> List[Tuple[str, str, str]]:
+    """
+    THIS is what src/main.py calls.
 
-    print()
-    print("=" * 60)
-    print("DATABRICKS CATALOG DISCOVERY")
-    print("=" * 60)
+    Discovers every schema and table inside the single catalog
+    configured in dq_rules.yml (framework.catalog), excluding
+    information_schema and the framework's own dqx_* schemas plus
+    anything listed under framework.excluded_schemas in the YAML.
 
-    framework = cfg["framework"]
+    Nothing here is hardcoded to a specific schema or table name -
+    add a new schema/table under the configured catalog and it is
+    picked up automatically on the next run.
 
-    catalog = framework["catalog"]
+    Returns a flat list of (catalog, schema, table) tuples.
+    """
 
-    excluded_schemas = {
-        str(x).lower()
-        for x in framework.get(
-            "excluded_schemas",
-            []
-        )
-    }
+    framework = cfg.get("framework", {})
+    catalog = framework.get("catalog")
 
-    allowlist = {
-        str(x).lower()
-        for x in framework.get(
-            "source_schema_allowlist",
-            []
-        )
-    }
-
-    print()
-    print(f"Catalog: {catalog}")
-
-    catalog_exists = any(
-        row[0] == catalog
-        for row in spark.sql(
-            "SHOW CATALOGS"
-        ).collect()
-    )
-
-    if not catalog_exists:
-
+    if not catalog:
         raise ValueError(
-            f"Catalog '{catalog}' does not exist"
+            "cfg['framework']['catalog'] is required for discover_tables()"
         )
 
-    tables = []
+    excluded_schemas = framework.get("excluded_schemas", [])
 
-    schema_rows = spark.sql(
-        f"SHOW SCHEMAS IN "
-        f"{quote_identifier(catalog)}"
-    ).collect()
+    print("\n" + "=" * 70)
+    print("DATABRICKS CATALOG DISCOVERY")
+    print("=" * 70)
 
-    for row in schema_rows:
+    print(f"\nCatalog: {catalog}")
 
-        schema = row[0]
-
-        if schema.lower() in excluded_schemas:
-            continue
-
-        if (
-            allowlist
-            and schema.lower() not in allowlist
-        ):
-            continue
-
-        print(
-            f"Discovering schema: {schema}"
-        )
-
-        try:
-
-            table_rows = spark.sql(
-                f"SHOW TABLES IN "
-                f"{quote_identifier(catalog)}."
-                f"{quote_identifier(schema)}"
-            ).collect()
-
-            for table_row in table_rows:
-
-                table = table_row[1]
-
-                is_temporary = (
-                    bool(table_row[2])
-                    if len(table_row) > 2
-                    else False
-                )
-
-                if is_temporary:
-                    continue
-
-                tables.append(
-                    (
-                        catalog,
-                        schema,
-                        table
-                    )
-                )
-
-        except Exception as exc:
-
-            print(
-                f"Unable to inspect "
-                f"{catalog}.{schema}: {exc}"
-            )
-
-    print()
-    print("=" * 60)
-    print("DISCOVERED TABLES")
-    print("=" * 60)
-
-    for catalog, schema, table in tables:
-
-        print(
-            f"{catalog}.{schema}.{table}"
-        )
-
-    print()
-    print(
-        f"Total Tables Found: {len(tables)}"
+    schemas = discover_schemas(
+        spark,
+        catalog,
+        excluded_schemas
     )
 
-    return tables
+    discovered: List[Tuple[str, str, str]] = []
+
+    for schema in schemas:
+
+        print(f"Discovering schema: {schema}")
+
+        tables = list_tables_in_schema(
+            spark,
+            catalog,
+            schema
+        )
+
+        for table in tables:
+            discovered.append((catalog, schema, table))
+
+    print("\n" + "=" * 70)
+    print("DISCOVERED TABLES")
+    print("=" * 70)
+
+    for catalog_name, schema_name, table_name in discovered:
+        print(f"{catalog_name}.{schema_name}.{table_name}")
+
+    print(f"\nTotal Tables Found: {len(discovered)}")
+
+    return discovered
+
+
+def get_table_columns(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+    table: str
+):
+    """
+    Return the Spark schema for a table.
+    """
+
+    return spark.table(
+        f"`{catalog}`.`{schema}`.`{table}`"
+    ).schema
+
+
+def get_table_dataframe(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+    table: str
+):
+    """
+    Load a dynamically discovered table.
+    """
+
+    return spark.table(
+        f"`{catalog}`.`{schema}`.`{table}`"
+    )
