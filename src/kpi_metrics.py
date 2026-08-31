@@ -1,31 +1,17 @@
 # ============================================================
 # KPI METRICS MODULE
-# Requirement 02 - Steps 1-4
+# Requirement 02 - Steps 1-4 + whiteboard-style final report
 #
-# IMPORTANT: this version writes into the SAME table your real
-# dq_rules.yml already configures ml_weighting.incident_table to
-# read from (wmg.demo.incident_history), using the EXACT column
-# names already declared in that table's table_rules block:
+# Writes into wmg.demo.incident_history using the EXACT column
+# names already declared in table_rules for that table:
 #   incident_count, avg_mttd_minutes, avg_mtta_minutes,
 #   avg_mttr_minutes, aidr_pct, severity_score, total_rev_impact
 #
-# You do NOT need to change ml_weighting.py's config wiring -
-# it already points at the right place. This module just needs
-# to actually populate that table.
-#
-# Pipeline position (see main_py_patch_notes.md):
-#   1. run_kpi_metrics(spark, cfg)   <- run BEFORE the table
-#      discovery loop, so wmg.demo.incident_history has fresh
-#      data before the DQ engine profiles/checks it like any
-#      other discovered source table.
-#   2. ml_weighting.train_dynamic_weights(spark, cfg, catalog)
-#      (unchanged) - Stage A: learns which metric (MTTD, MTTR,
-#      AIDR%, ...) best predicts total_rev_impact.
-#   3. compute_kpi_weights(spark, cfg)  <- run AFTER Stage A -
-#      Stage B: applies Stage A's metric importances to each
-#      KPI's own row, normalizes across KPIs to W1..Wn summing
-#      to 100 (matches the whiteboard), writes the final report
-#      to output_tables.kpi (wmg.dqx_audit.dq_kpis).
+# NEW in this version: build_incident_level_kpi_report() - the
+# single flat table requested for today's demo. One row per
+# incident, joined with that incident's KPI code and the current
+# ML-derived weight for that KPI. This is NOT a dashboard - it's
+# a table you SELECT * FROM and hand to a reviewer.
 # ============================================================
 
 from pyspark.sql import functions as F
@@ -36,7 +22,6 @@ from pyspark.sql import functions as F
 # ============================================================
 
 def _tbl(name: str) -> str:
-    """Turn 'catalog.schema.table' into `catalog`.`schema`.`table`."""
     return "`" + "`.`".join(name.split(".")) + "`"
 
 
@@ -45,7 +30,6 @@ def _minutes_between(end_col, start_col):
 
 
 def _resolve_incident_table(cfg):
-    """The KPI feature/history table = wherever ml_weighting.incident_table points."""
     ml_cfg = cfg.get("ml_weighting", {})
     table = ml_cfg.get("incident_table")
     if not table:
@@ -68,16 +52,17 @@ def _resolve_kpi_report_table(cfg):
     return f"{framework['catalog']}.{audit_schema}.{kpi_table_name}"
 
 
+def _resolve_incident_level_report_table(cfg):
+    kpi_cfg = cfg.get("kpi_metrics", {})
+    default = f"{cfg['framework']['catalog']}.{cfg['framework']['audit_schema']}.dq_kpi_incident_report"
+    return kpi_cfg.get("incident_report_table", default)
+
+
 # ============================================================
 # STEP 2 - PER-INCIDENT METRICS (TTD / TTA / TTR / automated flag)
 # ============================================================
 
 def compute_incident_durations(df):
-    """
-    Adds row-level duration/detection columns to the raw incident log.
-    Expects: event_timestamp, detected_timestamp, ack_timestamp,
-             resolved_timestamp, detection_type, rev_impact_amount.
-    """
     return (
         df
         .withColumn("ttd_min", _minutes_between("detected_timestamp", "event_timestamp"))
@@ -87,7 +72,6 @@ def compute_incident_durations(df):
             "is_automated",
             F.when(F.upper(F.trim(F.col("detection_type"))) == "AUTOMATED", F.lit(1)).otherwise(F.lit(0))
         )
-        # guard against bad/missing timestamps producing negative durations
         .withColumn("ttd_min", F.when(F.col("ttd_min") < 0, None).otherwise(F.col("ttd_min")))
         .withColumn("tta_min", F.when(F.col("tta_min") < 0, None).otherwise(F.col("tta_min")))
         .withColumn("ttr_min", F.when(F.col("ttr_min") < 0, None).otherwise(F.col("ttr_min")))
@@ -95,13 +79,23 @@ def compute_incident_durations(df):
 
 
 # ============================================================
-# CLASSIFY EACH INCIDENT TO A KPI (K01..K16) VIA label_kpi_map
+# CLASSIFY EACH INCIDENT TO A KPI
+#
+# IMPORTANT CHANGE: kpi codes in label_kpi_map now use the SAME
+# ids as dq_rules.yml (DQ01, DQ06, DQ10, DQ03, DQ13, DQ07) for
+# every label that genuinely corresponds to one of the 16 DQ
+# dimensions. This is what lets weight_resolver.py match a
+# dynamic KPI weight directly onto a DQ rule id. Labels that are
+# purely operational (not one of the 16 DQ dimensions, e.g.
+# "Availability") use an OPS-prefixed code instead - these still
+# get tracked and reported, they just won't override a DQ weight,
+# which is correct since there's no matching DQ check for them.
 # ============================================================
 
 def classify_kpi(spark, df, kpi_cfg):
     label_map = kpi_cfg.get("label_kpi_map", {})
     default_kpi = kpi_cfg.get(
-        "default_kpi", {"kpi": "K99", "kpi_name": "Unclassified", "dimension": "Unknown"}
+        "default_kpi", {"kpi": "OPS99", "kpi_name": "Unclassified", "dimension": "unclassified"}
     )
 
     rows = [
@@ -130,13 +124,10 @@ def classify_kpi(spark, df, kpi_cfg):
 
 # ============================================================
 # STEP 3 - AGGREGATE TO incident_history GRAIN
-# Grain = (incident_date, kpi, label) so the table accumulates
-# real history over time as new days/incidents land, instead of
-# collapsing everything into ~10 static rows every run.
 # ============================================================
 
 def aggregate_incident_history(df):
-    grouped = (
+    return (
         df.groupBy("incident_date", "kpi", "kpi_name", "dimension", "label")
         .agg(
             F.count(F.lit(1)).cast("int").alias("incident_count"),
@@ -147,16 +138,9 @@ def aggregate_incident_history(df):
             F.sum("rev_impact_amount").alias("total_rev_impact"),
         )
     )
-    return grouped
 
 
 def add_severity_score(df, severity_cfg):
-    """
-    severity_score: composite index combining duration (MTTR) and
-    revenue impact, each min-max normalized to 0-1 across the
-    current batch, blended per configured weights, scaled 0-100.
-    Column name matches table_rules.wmg.demo.incident_history exactly.
-    """
     duration_weight = float(severity_cfg.get("duration_weight", 0.5))
     revenue_weight = float(severity_cfg.get("revenue_weight", 0.5))
 
@@ -182,12 +166,6 @@ def add_severity_score(df, severity_cfg):
 
 
 def merge_into_incident_history(spark, df, target_table):
-    """
-    Idempotent upsert keyed on (incident_date, kpi, label) so
-    re-running the pipeline on the same day's incidents doesn't
-    create duplicate rows, while genuinely new incident-days
-    accumulate real history for ml_weighting to train on.
-    """
     from delta.tables import DeltaTable
 
     if not spark.catalog.tableExists(target_table):
@@ -219,16 +197,6 @@ def merge_into_incident_history(spark, df, target_table):
 # ============================================================
 
 def run_kpi_metrics(spark, cfg):
-    """
-    Reads the raw incident log, computes MTTD/MTTA/MTTR/AIDR,
-    classifies each incident to a KPI, aggregates to
-    (incident_date, kpi, label) grain, computes severity_score,
-    and MERGEs into wmg.demo.incident_history - the exact table
-    ml_weighting.py already trains on.
-
-    Safe no-op if kpi_metrics is disabled or the raw log table
-    doesn't exist yet, so it never blocks the rest of the pipeline.
-    """
     kpi_cfg = cfg.get("kpi_metrics", {})
     if not kpi_cfg.get("enabled", False):
         print("KPI metrics skipped: disabled in config.")
@@ -267,15 +235,10 @@ def run_kpi_metrics(spark, cfg):
 
 
 # ============================================================
-# STAGE B - PER-KPI DYNAMIC WEIGHTS (matches whiteboard W1..Wn)
+# STAGE B - PER-KPI DYNAMIC WEIGHTS
 # ============================================================
 
 def _kpi_level_aggregate(history_df):
-    """
-    Collapse the (incident_date, kpi, label) grain up to one row
-    per KPI, count-weighted - this is the row set the whiteboard's
-    KPI | Wt | Layer | Dimension table actually represents.
-    """
     weighted = (
         history_df
         .withColumn("w_mttd", F.col("avg_mttd_minutes") * F.col("incident_count"))
@@ -298,18 +261,6 @@ def _kpi_level_aggregate(history_df):
 
 
 def compute_kpi_weights(spark, cfg):
-    """
-    Stage B of the two-stage design (see module docstring).
-    Reads:
-      - wmg.demo.incident_history  (written by run_kpi_metrics)
-      - wmg.dqx_audit.dq_dynamic_weights (per-METRIC importances,
-        written by ml_weighting.train_dynamic_weights - Stage A)
-    Writes:
-      - wmg.dqx_audit.dq_kpis (output_tables.kpi) - per-KPI W1..Wn
-        normalized to 100, plus the metrics, matching the whiteboard.
-
-    Safe no-op if either input table is missing yet.
-    """
     kpi_cfg = cfg.get("kpi_metrics", {})
     ml_cfg = cfg.get("ml_weighting", {})
     if not kpi_cfg.get("enabled", False):
@@ -388,3 +339,106 @@ def compute_kpi_weights(spark, cfg):
     print(f"KPI report written: {report_table}")
     result.orderBy(F.col("weight").desc()).show(truncate=False)
     return result
+
+
+# ============================================================
+# NEW: WHITEBOARD-STYLE FLAT REPORT (one row per incident)
+# ============================================================
+
+def build_incident_level_kpi_report(spark, cfg):
+    """
+    The reviewer-facing table: incident-level rows (date, incident,
+    rev impact, DS, label) joined with that incident's KPI code and
+    the CURRENT dynamic weight/aggregate stats for that KPI.
+
+    SELECT * FROM <this table> ORDER BY date; is the whole demo.
+    """
+    kpi_cfg = cfg.get("kpi_metrics", {})
+    if not kpi_cfg.get("enabled", False):
+        return None
+
+    log_table = kpi_cfg.get("incident_log_table")
+    weights_table = _resolve_kpi_report_table(cfg)
+
+    if not spark.catalog.tableExists(log_table):
+        print("Incident-level KPI report skipped: incident log not found.")
+        return None
+    if not spark.catalog.tableExists(weights_table):
+        print("Incident-level KPI report skipped: dq_kpis not populated yet "
+              "(run compute_kpi_weights first).")
+        return None
+
+    raw = spark.table(log_table)
+    with_durations = compute_incident_durations(raw)
+    classified = classify_kpi(spark, with_durations, kpi_cfg)
+
+    weights_df = spark.table(weights_table)
+    latest_ts = weights_df.agg(F.max("run_timestamp")).collect()[0][0]
+    if latest_ts is None:
+        print("Incident-level KPI report skipped: dq_kpis has no rows yet.")
+        return None
+
+    latest_weights = (
+        weights_df
+        .filter(F.col("run_timestamp") == latest_ts)
+        .select(
+            F.col("kpi").alias("w_kpi"),
+            F.col("weight").alias("ml_weight"),
+            F.col("avg_mttd_minutes").alias("kpi_avg_mttd_minutes"),
+            F.col("avg_mtta_minutes").alias("kpi_avg_mtta_minutes"),
+            F.col("avg_mttr_minutes").alias("kpi_avg_mttr_minutes"),
+            F.col("aidr_pct").alias("kpi_aidr_pct"),
+            F.col("severity_score").alias("kpi_severity_score"),
+        )
+    )
+
+    report = (
+        classified
+        .join(latest_weights, classified["kpi"] == latest_weights["w_kpi"], "left")
+        .select(
+            F.col("incident_date").alias("date"),
+            F.col("incident_id"),
+            F.col("incident_description").alias("incident"),
+            F.col("rev_impact_flag"),
+            F.col("rev_impact_amount"),
+            F.col("ds"),
+            F.col("label").alias("label_code"),
+            F.col("kpi"),
+            F.col("kpi_name"),
+            F.col("ttd_min").alias("incident_mttd_min"),
+            F.col("tta_min").alias("incident_mtta_min"),
+            F.col("ttr_min").alias("incident_mttr_min"),
+            F.col("is_automated"),
+            F.col("ml_weight"),
+            F.col("kpi_avg_mttd_minutes"),
+            F.col("kpi_avg_mtta_minutes"),
+            F.col("kpi_avg_mttr_minutes"),
+            F.col("kpi_aidr_pct"),
+            F.col("kpi_severity_score"),
+        )
+        .withColumn("report_generated_timestamp", F.current_timestamp())
+    )
+
+    report_table = _resolve_incident_level_report_table(cfg)
+
+    from delta.tables import DeltaTable
+    if not spark.catalog.tableExists(report_table):
+        (
+            report.write.format("delta")
+            .mode("overwrite")
+            .option("overwriteSchema", "true")
+            .saveAsTable(report_table)
+        )
+    else:
+        delta_tbl = DeltaTable.forName(spark, report_table)
+        (
+            delta_tbl.alias("t")
+            .merge(report.alias("s"), "t.incident_id = s.incident_id")
+            .whenMatchedUpdateAll()
+            .whenNotMatchedInsertAll()
+            .execute()
+        )
+
+    print(f"Incident-level KPI report written: {report_table}")
+    spark.table(report_table).orderBy("date").show(truncate=False)
+    return report

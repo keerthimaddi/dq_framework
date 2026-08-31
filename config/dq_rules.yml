@@ -617,92 +617,59 @@ profiling:
 # KPI METRICS
 # ============================================================
 
-kpi_metrics:
+# ============================================================
+# CHANGES TO config/dq_rules.yml
+#
+# 1. label_kpi_map codes CHANGED from K01/K06/K10/K03/K13/K04/K07
+#    to DQ01/DQ06/DQ10/DQ03/DQ13/DQ07 - aligned with your existing
+#    dq_rules.yml "id" fields. This is what lets weight_resolver.py
+#    match a dynamic KPI weight directly onto a DQ rule by id.
+#    Labels with no real DQ-dimension equivalent (Availability) use
+#    an OPS-prefixed code instead - purely informational, correctly
+#    excluded from DQ weight overrides.
+#
+# 2. Added incident_report_table key for the new whiteboard-style
+#    flat report.
+#
+# REPLACE your existing kpi_metrics: block with this ENTIRE block.
+# ============================================================
 
+kpi_metrics:
   enabled: true
 
-  # Source table created by create_incident_log.sql
   incident_log_table: "wmg.dqx_audit.dq_incident_log"
 
-  # Severity calculation:
-  # severity_score =
-  #     duration_weight * norm(mttr)
-  #   + revenue_weight * norm(rev_impact)
-  #
-  # These values must add up to 1.0.
+  incident_report_table: "wmg.dqx_audit.dq_kpi_incident_report"
+
   severity_weights:
     duration_weight: 0.5
     revenue_weight: 0.5
 
-  # ----------------------------------------------------------
-  # INCIDENT LABEL → KPI MAPPING
-  # ----------------------------------------------------------
-  #
-  # IMPORTANT:
-  # Review these labels against the actual labels in your
-  # dq_incident_log table before running the pipeline.
-  #
-  # Anything not listed here will use default_kpi.
-  # ----------------------------------------------------------
-
+  # kpi codes now match dq_rules.yml "id" values wherever a real
+  # correspondence exists (see comment above). REVIEW before relying
+  # on this for a live demo - still inferred from your 5 example rows.
   label_kpi_map:
+    "Null Primary Keys":            { kpi: "DQ01", kpi_name: "Completeness", dimension: "completeness" }
+    "Data Quality Breach":          { kpi: "DQ01", kpi_name: "Completeness", dimension: "completeness" }
+    "FK Mismatch":                  { kpi: "DQ06", kpi_name: "Integrity",    dimension: "integrity" }
+    "Duplicate Check Failure":      { kpi: "DQ10", kpi_name: "Duplicate",    dimension: "duplicate" }
+    "Format/Regex Failure":         { kpi: "DQ03", kpi_name: "Validity",     dimension: "validity" }
+    "Type Conversion Error":        { kpi: "DQ13", kpi_name: "Data Type",    dimension: "data_type" }
+    "Code Failure / Schema Shift":  { kpi: "OPS01", kpi_name: "Availability", dimension: "availability" }
+    "Network / Timeout":            { kpi: "OPS01", kpi_name: "Availability", dimension: "availability" }
+    "Resource Contention":          { kpi: "DQ07", kpi_name: "Timeliness",   dimension: "timeliness" }
+    "SLA Latency Breach":           { kpi: "DQ07", kpi_name: "Timeliness",   dimension: "timeliness" }
 
-    "Null Primary Keys":
-      kpi: "K01"
-      kpi_name: "Completeness"
-      dimension: "Bronze / Raw"
-
-    "Data Quality Breach":
-      kpi: "K01"
-      kpi_name: "Completeness"
-      dimension: "Bronze / Raw"
-
-    "FK Mismatch":
-      kpi: "K06"
-      kpi_name: "Integrity"
-      dimension: "Silver / Clean"
-
-    "Duplicate Check Failure":
-      kpi: "K10"
-      kpi_name: "Duplicate"
-      dimension: "Silver / Clean"
-
-    "Format/Regex Failure":
-      kpi: "K03"
-      kpi_name: "Validity"
-      dimension: "Silver / Clean"
-
-    "Type Conversion Error":
-      kpi: "K13"
-      kpi_name: "Data Type"
-      dimension: "Bronze / Raw"
-
-    "Code Failure / Schema Shift":
-      kpi: "K04"
-      kpi_name: "Availability"
-      dimension: "Pipeline Engine"
-
-    "Network / Timeout":
-      kpi: "K04"
-      kpi_name: "Availability"
-      dimension: "Pipeline Engine"
-
-    "Resource Contention":
-      kpi: "K07"
-      kpi_name: "Timeliness"
-      dimension: "Gold / Layer"
-
-    "SLA Latency Breach":
-      kpi: "K07"
-      kpi_name: "Timeliness"
-      dimension: "Gold / Layer"
-
-  # If an incident label doesn't appear above,
-  # it will be classified here.
   default_kpi:
-    kpi: "K99"
+    kpi: "OPS99"
     kpi_name: "Unclassified"
-    dimension: "Unknown"
+    dimension: "unclassified"
+
+
+# ============================================================
+# NO CHANGE to ml_weighting: - leave exactly as-is, it already
+# points at the right table with the right column names.
+# ============================================================
 
 
 # ============================================================

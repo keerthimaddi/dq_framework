@@ -37,11 +37,19 @@ from src.lakehouse import (
 
 from src.quarantine_rules import build_failure_condition
 
-from src.auto_rules import build_auto_rule, merge_rules
-
 from src.ml_weighting import train_dynamic_weights
 
-from src.kpi_metrics import run_kpi_metrics, compute_kpi_weights
+from src.auto_rules import build_auto_rule, merge_rules
+
+from src.kpi_metrics import (
+    run_kpi_metrics,
+    compute_kpi_weights,
+    build_incident_level_kpi_report,
+)
+
+from src.weight_resolver import build_effective_weights
+
+from src.reingest import run_reingestion
 
 
 # ============================================================
@@ -119,15 +127,9 @@ def process_table(spark, cfg, catalog, schema, table):
     print()
     print("Running data profiling...")
 
-    null_threshold = (
-        cfg.get("profiling", {}).get("candidate_null_rate_pct", 1.0)
-    )
-
     try:
         profile_rows = profile_table(df, catalog, schema, table)
-        candidate_rows = create_rule_candidates(
-            profile_rows, null_threshold=null_threshold
-        )
+        candidate_rows = create_rule_candidates(profile_rows)
 
         print(f"Profile rows    : {len(profile_rows)}")
         print(f"Rule candidates : {len(candidate_rows)}")
@@ -149,7 +151,6 @@ def process_table(spark, cfg, catalog, schema, table):
 
     # --------------------------------------------------------
     # BUILD EFFECTIVE RULE: AUTO (metadata-derived) + MANUAL
-    # (optional table_rules entry in dq_rules.yml, if present)
     # --------------------------------------------------------
     print()
     print("Deriving DQ rules from table metadata...")
@@ -171,8 +172,6 @@ def process_table(spark, cfg, catalog, schema, table):
         )
     )
 
-    # cfg is reused across tables in the discovery loop, so scope
-    # the injected rule to THIS table only via a shallow copy.
     table_cfg = dict(cfg)
     table_cfg["table_rules"] = {
         **cfg.get("table_rules", {}),
@@ -204,6 +203,12 @@ def process_table(spark, cfg, catalog, schema, table):
 
     # --------------------------------------------------------
     # CALCULATE SCORE + STATUS
+    #
+    # NOTE: calculate_score currently reads dq_rules.yml
+    # default_weight only (see weight_resolver.py + README for
+    # the pending integration that will make this dynamic-weight
+    # aware). Not changed here to avoid touching dq_engine.py
+    # blind - see project status doc.
     # --------------------------------------------------------
     score = calculate_score(cfg, results)
     status = overall_status(score, cfg["overall_thresholds"])
@@ -216,11 +221,7 @@ def process_table(spark, cfg, catalog, schema, table):
     # QUALITY GATE
     # --------------------------------------------------------
     quality_gate = cfg["quality_gate"]
-
-    gate_threshold = float(
-        quality_gate.get("silver_min_score", 90)
-    )
-
+    gate_threshold = float(quality_gate.get("silver_min_score", 90))
     gate_enabled = quality_gate.get("enabled", True)
 
     if not gate_enabled:
@@ -242,14 +243,7 @@ def process_table(spark, cfg, catalog, schema, table):
     failure_condition = build_failure_condition(bronze_df, effective_rule)
 
     quarantined_count = create_quarantine(
-        spark,
-        bronze_df,
-        failure_condition,
-        catalog,
-        schema,
-        table,
-        cfg,
-        run_id,
+        spark, bronze_df, failure_condition, catalog, schema, table, cfg, run_id,
     )
 
     # --------------------------------------------------------
@@ -258,73 +252,44 @@ def process_table(spark, cfg, catalog, schema, table):
     print()
     print("Evaluating Silver promotion...")
 
-    silver_created = create_silver(
-        spark, bronze_df, catalog, table, cfg, score
-    )
+    silver_created = create_silver(spark, bronze_df, catalog, table, cfg, score)
 
     # --------------------------------------------------------
     # GOLD (only if Silver exists)
     # --------------------------------------------------------
     gold_created = False
-
     if silver_created:
         print()
         print("Evaluating Gold promotion...")
-
-        gold_created = create_gold(
-            spark, catalog, table, cfg, score, status
-        )
+        gold_created = create_gold(spark, catalog, table, cfg, score, status)
 
     # --------------------------------------------------------
     # BUILD SUMMARY ROW
     # --------------------------------------------------------
     summary_row = {
-        "catalog": catalog,
-        "schema": schema,
-        "table": table,
-        "run_id": run_id,
-        "run_timestamp": run_timestamp,
-        "row_count": int(row_count),
-        "column_count": int(column_count),
-        "dq01": results.get("DQ01", "WARNING"),
-        "dq02": results.get("DQ02", "WARNING"),
-        "dq03": results.get("DQ03", "WARNING"),
-        "dq04": results.get("DQ04", "WARNING"),
-        "dq05": results.get("DQ05", "WARNING"),
-        "dq06": results.get("DQ06", "WARNING"),
-        "dq07": results.get("DQ07", "WARNING"),
-        "dq08": results.get("DQ08", "WARNING"),
-        "dq09": results.get("DQ09", "WARNING"),
-        "dq10": results.get("DQ10", "WARNING"),
-        "dq11": results.get("DQ11", "WARNING"),
-        "dq12": results.get("DQ12", "WARNING"),
-        "dq13": results.get("DQ13", "WARNING"),
-        "dq14": results.get("DQ14", "WARNING"),
-        "dq15": results.get("DQ15", "WARNING"),
-        "dq16": results.get("DQ16", "WARNING"),
-        "dq_score": float(score),
-        "total_score": float(score),
-        "overall_status": status,
-        "quality_gate": gate_status,
+        "catalog": catalog, "schema": schema, "table": table,
+        "run_id": run_id, "run_timestamp": run_timestamp,
+        "row_count": int(row_count), "column_count": int(column_count),
+        "dq01": results.get("DQ01", "WARNING"), "dq02": results.get("DQ02", "WARNING"),
+        "dq03": results.get("DQ03", "WARNING"), "dq04": results.get("DQ04", "WARNING"),
+        "dq05": results.get("DQ05", "WARNING"), "dq06": results.get("DQ06", "WARNING"),
+        "dq07": results.get("DQ07", "WARNING"), "dq08": results.get("DQ08", "WARNING"),
+        "dq09": results.get("DQ09", "WARNING"), "dq10": results.get("DQ10", "WARNING"),
+        "dq11": results.get("DQ11", "WARNING"), "dq12": results.get("DQ12", "WARNING"),
+        "dq13": results.get("DQ13", "WARNING"), "dq14": results.get("DQ14", "WARNING"),
+        "dq15": results.get("DQ15", "WARNING"), "dq16": results.get("DQ16", "WARNING"),
+        "dq_score": float(score), "total_score": float(score),
+        "overall_status": status, "quality_gate": gate_status,
         "quarantined_records": int(quarantined_count),
-        "silver_created": bool(silver_created),
-        "gold_created": bool(gold_created),
+        "silver_created": bool(silver_created), "gold_created": bool(gold_created),
     }
 
-    # --------------------------------------------------------
-    # BUILD DETAIL ROWS
-    # --------------------------------------------------------
     detail_rows = []
-
     for detail in details:
         detail_rows.append({
-            "catalog": catalog,
-            "schema": schema,
-            "table": table,
-            "run_id": run_id,
-            "run_timestamp": run_timestamp,
-            "dq_id": detail["dq_id"],
-            "status": detail["status"],
+            "catalog": catalog, "schema": schema, "table": table,
+            "run_id": run_id, "run_timestamp": run_timestamp,
+            "dq_id": detail["dq_id"], "status": detail["status"],
             "failure_percentage": float(detail["failure_percentage"]),
             "failed_records": int(detail["failed_records"]),
         })
@@ -343,38 +308,23 @@ def main():
     print("STARTING CAMPAIGN DATA QUALITY PIPELINE")
     print("=" * 70)
 
-    # --------------------------------------------------------
-    # LOAD CONFIGURATION
-    # --------------------------------------------------------
     cfg = load_config()
     print_configuration(cfg)
 
-    # --------------------------------------------------------
-    # CREATE SPARK SESSION
-    # --------------------------------------------------------
     spark = get_spark_session()
 
-    # --------------------------------------------------------
-    # ENSURE BRONZE/SILVER/GOLD/AUDIT/QUARANTINE/PROFILING
-    # SCHEMAS EXIST
-    # --------------------------------------------------------
     create_framework_schemas(spark, cfg)
 
     # --------------------------------------------------------
     # KPI METRICS (Requirement 02, Steps 1-3)
-    # Runs BEFORE discovery on purpose: this MERGEs fresh
-    # MTTD/MTTA/MTTR/AIDR rows into wmg.demo.incident_history,
-    # so the table-discovery loop right after this picks up
-    # and DQ-checks the UPDATED incident_history, not stale
-    # data from the previous run. Non-fatal: if the raw
-    # incident log isn't populated yet, this is a safe no-op
-    # and the rest of the pipeline still runs.
+    # Runs BEFORE table discovery so wmg.demo.incident_history is
+    # freshly merged before the DQ engine discovers and checks it
+    # in the loop below, in this same run.
     # --------------------------------------------------------
     print()
     print("=" * 70)
     print("KPI METRICS")
     print("=" * 70)
-
     try:
         run_kpi_metrics(spark, cfg)
     except Exception as exc:
@@ -403,23 +353,18 @@ def main():
     failed_tables = 0
 
     for catalog, schema, table in tables:
-
         try:
             result = process_table(spark, cfg, catalog, schema, table)
-
             if result is None or result[0] is None:
                 failed_tables += 1
                 continue
 
             summary, details, profiles, candidates = result
-
             if summary:
                 summary_rows.append(summary)
-
             detail_rows.extend(details)
             profile_rows.extend(profiles)
             candidate_rows.extend(candidates)
-
             successful_tables += 1
 
         except Exception as exc:
@@ -435,7 +380,6 @@ def main():
     print("=" * 70)
     print("WRITING AUDIT RESULTS")
     print("=" * 70)
-
     try:
         write_audit(spark, cfg, summary_rows, detail_rows, profile_rows)
         print("Audit results written successfully.")
@@ -449,10 +393,8 @@ def main():
         try:
             candidate_schema = cfg["framework"]["candidate_schema"]
             candidate_table = cfg["output_tables"].get("candidates")
-
             if candidate_table:
                 candidate_df = spark.createDataFrame(candidate_rows)
-
                 (
                     candidate_df.write
                     .format("delta")
@@ -464,9 +406,7 @@ def main():
                         f"`{candidate_table}`"
                     )
                 )
-
                 print("Rule candidates written successfully.")
-
         except Exception as exc:
             print(f"Candidate write failed: {exc}")
 
@@ -477,25 +417,58 @@ def main():
     print("=" * 70)
     print("ML DYNAMIC WEIGHTING")
     print("=" * 70)
-
     try:
         train_dynamic_weights(spark, cfg, cfg["framework"]["catalog"])
     except Exception as exc:
         print(f"ML weighting step failed (non-fatal): {exc}")
 
     # --------------------------------------------------------
-    # KPI DYNAMIC WEIGHTS - Stage B (per-KPI W1..Wn, whiteboard
-    # shape) + final KPI report
+    # KPI DYNAMIC WEIGHTS - Stage B (per-KPI W1..Wn)
     # --------------------------------------------------------
     print()
     print("=" * 70)
-    print("KPI DYNAMIC WEIGHTS + REPORT")
+    print("KPI DYNAMIC WEIGHTS")
     print("=" * 70)
-
     try:
         compute_kpi_weights(spark, cfg)
     except Exception as exc:
-        print(f"KPI weighting/report step failed (non-fatal): {exc}")
+        print(f"KPI weighting step failed (non-fatal): {exc}")
+
+    # --------------------------------------------------------
+    # WHITEBOARD-STYLE FLAT REPORT (today's deliverable table)
+    # --------------------------------------------------------
+    print()
+    print("=" * 70)
+    print("INCIDENT-LEVEL KPI REPORT")
+    print("=" * 70)
+    try:
+        build_incident_level_kpi_report(spark, cfg)
+    except Exception as exc:
+        print(f"Incident-level KPI report failed (non-fatal): {exc}")
+
+    # --------------------------------------------------------
+    # WEIGHT RESOLVER DEMONSTRATION
+    # Proves dynamic-weight-with-YAML-fallback resolution works
+    # TODAY, even though calculate_score() doesn't consume it yet
+    # (that integration needs dq_engine.py's actual source - see
+    # README "Known Limitations").
+    # --------------------------------------------------------
+    print()
+    print("=" * 70)
+    print("EFFECTIVE WEIGHT RESOLUTION (preview - not yet wired into scoring)")
+    print("=" * 70)
+    try:
+        build_effective_weights(spark, cfg)
+    except Exception as exc:
+        print(f"Weight resolver preview failed (non-fatal): {exc}")
+
+    # --------------------------------------------------------
+    # RE-INGESTION
+    # --------------------------------------------------------
+    try:
+        run_reingestion(spark, cfg, tables)
+    except Exception as exc:
+        print(f"Re-ingestion step failed (non-fatal): {exc}")
 
     # --------------------------------------------------------
     # FINAL REPORT
@@ -509,7 +482,6 @@ def main():
     print("=" * 70)
     print("PIPELINE EXECUTION SUMMARY")
     print("=" * 70)
-
     print(f"Tables discovered : {len(tables)}")
     print(f"Tables processed  : {successful_tables}")
     print(f"Tables failed     : {failed_tables}")
@@ -517,23 +489,16 @@ def main():
     print(f"Detail records    : {len(detail_rows)}")
     print(f"Profile records   : {len(profile_rows)}")
     print(f"Rule candidates   : {len(candidate_rows)}")
-
     print()
     print("=" * 70)
-
     if failed_tables == 0:
         print("PIPELINE COMPLETED SUCCESSFULLY")
     else:
         print("PIPELINE COMPLETED WITH TABLE ERRORS")
-
     print("=" * 70)
 
     spark.stop()
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     main()
