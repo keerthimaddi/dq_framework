@@ -1,28 +1,23 @@
 # ============================================================
 # DQ ENGINE
 # DQ01 - DQ16
+# Dynamic ML/KPI weights are supported.
 # ============================================================
 
 from pyspark.sql import functions as F
 
 
-def safe_column_name(name):
+# ============================================================
+# HELPERS
+# ============================================================
 
+def safe_column_name(name):
     import re
 
     name = str(name).strip()
 
-    name = re.sub(
-        r"[^A-Za-z0-9_]",
-        "_",
-        name
-    )
-
-    name = re.sub(
-        r"_+",
-        "_",
-        name
-    )
+    name = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    name = re.sub(r"_+", "_", name)
 
     name = name.strip("_")
 
@@ -35,17 +30,12 @@ def safe_column_name(name):
     return name.lower()
 
 
-def resolve_column(
-    df,
-    column_name
-):
+def resolve_column(df, column_name):
 
     if column_name in df.columns:
         return column_name
 
-    safe = safe_column_name(
-        column_name
-    )
+    safe = safe_column_name(column_name)
 
     if safe in df.columns:
         return safe
@@ -53,13 +43,9 @@ def resolve_column(
     return None
 
 
-def status_from_percentage(
-    percentage
-):
+def status_from_percentage(percentage):
 
-    percentage = float(
-        percentage
-    )
+    percentage = float(percentage)
 
     if percentage <= 0:
         return "PASS"
@@ -70,39 +56,20 @@ def status_from_percentage(
     return "FAIL"
 
 
-def get_table_rule(
-    cfg,
-    catalog,
-    schema,
-    table
-):
+def get_table_rule(cfg, catalog, schema, table):
 
-    source = (
-        f"{catalog}.{schema}.{table}"
-    )
+    source = f"{catalog}.{schema}.{table}"
 
-    return cfg.get(
-        "table_rules",
-        {}
-    ).get(
-        source,
-        {}
-    )
+    return cfg.get("table_rules", {}).get(source, {})
 
 
 # ============================================================
-# DQ01 COMPLETENESS
+# DQ01 - COMPLETENESS
 # ============================================================
 
-def dq01_completeness(
-    df,
-    rule
-):
+def dq01_completeness(df, rule):
 
-    columns = rule.get(
-        "mandatory_columns",
-        []
-    )
+    columns = rule.get("mandatory_columns", [])
 
     if not columns:
         return "PASS", 0.0, 0
@@ -119,25 +86,15 @@ def dq01_completeness(
     ]
 
     if missing_columns:
-
-        return (
-            "FAIL",
-            100.0,
-            total
-        )
+        return "FAIL", 100.0, total
 
     condition = None
 
     for column in columns:
 
-        resolved = resolve_column(
-            df,
-            column
-        )
+        resolved = resolve_column(df, column)
 
-        current = (
-            F.col(resolved).isNull()
-        )
+        current = F.col(resolved).isNull()
 
         condition = (
             current
@@ -145,208 +102,24 @@ def dq01_completeness(
             else condition | current
         )
 
-    failed = df.filter(
-        condition
-    ).count()
+    failed = df.filter(condition).count()
 
-    percentage = (
-        failed / total * 100
-    )
+    percentage = failed / total * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ02 ACCURACY
+# DQ02 - ACCURACY
 # ============================================================
 
-def dq02_accuracy(
-    df,
-    rule
-):
+def dq02_accuracy(df, rule):
 
-    expressions = rule.get(
-        "row_expressions",
-        {}
-    )
-
-    if not expressions:
-        return "PASS", 0.0, 0
-
-    total = df.count()
-
-    if total == 0:
-        return "PASS", 0.0, 0
-
-    failed_rows = 0
-
-    for expression in expressions.values():
-
-        try:
-
-            failed_rows += df.filter(
-                F.coalesce(
-                    F.expr(expression),
-                    F.lit(False)
-                ) == F.lit(False)
-            ).count()
-
-        except Exception as exc:
-
-            print(
-                f"DQ02 expression skipped: "
-                f"{expression} | {exc}"
-            )
-
-    percentage = (
-        failed_rows / total * 100
-    )
-
-    return (
-        status_from_percentage(
-            percentage
-        ),
-        percentage,
-        failed_rows
-    )
-
-
-# ============================================================
-# DQ03 VALIDITY
-# ============================================================
-
-def dq03_validity(
-    df,
-    rule
-):
-
-    allowed_values = rule.get(
-        "allowed_values",
-        {}
-    )
-
-    if not allowed_values:
-        return "PASS", 0.0, 0
-
-    total = df.count()
-
-    if total == 0:
-        return "PASS", 0.0, 0
-
-    failed = 0
-
-    for column, values in (
-        allowed_values.items()
-    ):
-
-        resolved = resolve_column(
-            df,
-            column
-        )
-
-        if not resolved:
-
-            failed += total
-
-            continue
-
-        failed += df.filter(
-            F.col(resolved).isNotNull()
-            &
-            ~F.col(resolved).isin(values)
-        ).count()
-
-    percentage = (
-        failed / total * 100
-    )
-
-    return (
-        status_from_percentage(
-            percentage
-        ),
-        percentage,
-        failed
-    )
-
-
-# ============================================================
-# DQ04 UNIQUENESS
-# ============================================================
-
-def dq04_uniqueness(
-    df,
-    rule
-):
-
-    keys = rule.get(
-        "unique_keys",
-        []
-    )
-
-    if not keys:
-        return "PASS", 0.0, 0
-
-    resolved_keys = [
-        resolve_column(df, key)
-        for key in keys
-    ]
-
-    if any(
-        key is None
-        for key in resolved_keys
-    ):
-
-        return "FAIL", 100.0, df.count()
-
-    total = df.count()
-
-    if total == 0:
-        return "PASS", 0.0, 0
-
-    unique_count = (
-        df.select(
-            *resolved_keys
-        )
-        .dropDuplicates()
-        .count()
-    )
-
-    duplicate_rows = (
-        total - unique_count
-    )
-
-    percentage = (
-        duplicate_rows / total * 100
-    )
-
-    return (
-        status_from_percentage(
-            percentage
-        ),
-        percentage,
-        duplicate_rows
-    )
-
-
-# ============================================================
-# DQ05 CONSISTENCY
-# ============================================================
-
-def dq05_consistency(
-    df,
-    rule
-):
-
-    expressions = rule.get(
-        "consistency_rules",
-        {}
-    )
+    expressions = rule.get("row_expressions", {})
 
     if not expressions:
         return "PASS", 0.0, 0
@@ -365,32 +138,154 @@ def dq05_consistency(
             failed += df.filter(
                 F.coalesce(
                     F.expr(expression),
-                    F.lit(False)
+                    F.lit(False),
                 ) == F.lit(False)
             ).count()
 
         except Exception as exc:
 
             print(
-                f"DQ05 expression skipped: "
-                f"{exc}"
+                f"DQ02 expression skipped: "
+                f"{expression} | {exc}"
             )
 
-    percentage = (
-        failed / total * 100
-    )
+    percentage = failed / total * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ06 INTEGRITY
+# DQ03 - VALIDITY
+# ============================================================
+
+def dq03_validity(df, rule):
+
+    allowed_values = rule.get("allowed_values", {})
+
+    if not allowed_values:
+        return "PASS", 0.0, 0
+
+    total = df.count()
+
+    if total == 0:
+        return "PASS", 0.0, 0
+
+    failed = 0
+
+    for column, values in allowed_values.items():
+
+        resolved = resolve_column(df, column)
+
+        if not resolved:
+            failed += total
+            continue
+
+        failed += df.filter(
+            F.col(resolved).isNotNull()
+            &
+            ~F.col(resolved).isin(values)
+        ).count()
+
+    percentage = failed / total * 100
+
+    return (
+        status_from_percentage(percentage),
+        percentage,
+        failed,
+    )
+
+
+# ============================================================
+# DQ04 - UNIQUENESS
+# ============================================================
+
+def dq04_uniqueness(df, rule):
+
+    keys = rule.get("unique_keys", [])
+
+    if not keys:
+        return "PASS", 0.0, 0
+
+    resolved_keys = [
+        resolve_column(df, key)
+        for key in keys
+    ]
+
+    if any(key is None for key in resolved_keys):
+        return "FAIL", 100.0, df.count()
+
+    total = df.count()
+
+    if total == 0:
+        return "PASS", 0.0, 0
+
+    unique_count = (
+        df.select(*resolved_keys)
+        .dropDuplicates()
+        .count()
+    )
+
+    duplicate_rows = total - unique_count
+
+    percentage = duplicate_rows / total * 100
+
+    return (
+        status_from_percentage(percentage),
+        percentage,
+        duplicate_rows,
+    )
+
+
+# ============================================================
+# DQ05 - CONSISTENCY
+# ============================================================
+
+def dq05_consistency(df, rule):
+
+    expressions = rule.get("consistency_rules", {})
+
+    if not expressions:
+        return "PASS", 0.0, 0
+
+    total = df.count()
+
+    if total == 0:
+        return "PASS", 0.0, 0
+
+    failed = 0
+
+    for expression in expressions.values():
+
+        try:
+
+            failed += df.filter(
+                F.coalesce(
+                    F.expr(expression),
+                    F.lit(False),
+                ) == F.lit(False)
+            ).count()
+
+        except Exception as exc:
+
+            print(
+                f"DQ05 expression skipped: {exc}"
+            )
+
+    percentage = failed / total * 100
+
+    return (
+        status_from_percentage(percentage),
+        percentage,
+        failed,
+    )
+
+
+# ============================================================
+# DQ06 - INTEGRITY
 # ============================================================
 
 def dq06_integrity(
@@ -399,24 +294,17 @@ def dq06_integrity(
     catalog,
     schema,
     table,
-    cfg
+    cfg,
 ):
 
-    relationships = cfg.get(
-        "relationships",
-        []
-    )
+    relationships = cfg.get("relationships", [])
 
-    source = (
-        f"{catalog}.{schema}.{table}"
-    )
+    source = f"{catalog}.{schema}.{table}"
 
     relevant = [
         relationship
         for relationship in relationships
-        if relationship.get(
-            "child_table"
-        ) == source
+        if relationship.get("child_table") == source
     ]
 
     if not relevant:
@@ -433,28 +321,20 @@ def dq06_integrity(
 
         child_column = resolve_column(
             df,
-            relationship[
-                "child_column"
-            ]
+            relationship["child_column"],
         )
 
         if not child_column:
             total_failed += total_rows
             continue
 
-        parent_table = relationship[
-            "parent_table"
-        ]
+        parent_table = relationship["parent_table"]
 
-        parent_df = spark.table(
-            parent_table
-        )
+        parent_df = spark.table(parent_table)
 
         parent_column = resolve_column(
             parent_df,
-            relationship[
-                "parent_column"
-            ]
+            relationship["parent_column"],
         )
 
         if not parent_column:
@@ -464,28 +344,18 @@ def dq06_integrity(
         parent_values = (
             parent_df
             .select(
-                F.col(
-                    parent_column
-                ).alias(
-                    "_parent_key"
-                )
+                F.col(parent_column).alias("_parent_key")
             )
             .dropDuplicates()
         )
 
         child_values = df.select(
-            F.col(
-                child_column
-            ).alias(
-                "_child_key"
-            )
+            F.col(child_column).alias("_child_key")
         )
 
-        nullable_allowed = (
-            relationship.get(
-                "nullable_allowed",
-                True
-            )
+        nullable_allowed = relationship.get(
+            "nullable_allowed",
+            True,
         )
 
         if nullable_allowed:
@@ -512,40 +382,29 @@ def dq06_integrity(
                 parent_values,
                 F.col("_child_key")
                 == F.col("_parent_key"),
-                "left_anti"
+                "left_anti",
             )
             .count()
         )
 
         total_failed += invalid
 
-    percentage = (
-        total_failed / total_rows * 100
-    )
+    percentage = total_failed / total_rows * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        total_failed
+        total_failed,
     )
 
 
 # ============================================================
-# DQ07 TIMELINESS
+# DQ07 - TIMELINESS
 # ============================================================
 
-def dq07_timeliness(
-    df,
-    rule,
-    cfg
-):
+def dq07_timeliness(df, rule, cfg):
 
-    date_columns = rule.get(
-        "date_columns",
-        []
-    )
+    date_columns = rule.get("date_columns", [])
 
     if not date_columns:
         return "PASS", 0.0, 0
@@ -554,17 +413,13 @@ def dq07_timeliness(
 
     for column in date_columns:
 
-        resolved = resolve_column(
-            df,
-            column
-        )
+        resolved = resolve_column(df, column)
 
         if resolved:
             date_column = resolved
             break
 
     if not date_column:
-
         return "FAIL", 100.0, df.count()
 
     total = df.count()
@@ -572,9 +427,7 @@ def dq07_timeliness(
     if total == 0:
         return "PASS", 0.0, 0
 
-    parsed = F.to_date(
-        F.col(date_column)
-    )
+    parsed = F.to_date(F.col(date_column))
 
     invalid = df.filter(
         F.col(date_column).isNotNull()
@@ -582,32 +435,22 @@ def dq07_timeliness(
         parsed.isNull()
     ).count()
 
-    percentage = (
-        invalid / total * 100
-    )
+    percentage = invalid / total * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        invalid
+        invalid,
     )
 
 
 # ============================================================
-# DQ08 CONFORMITY
+# DQ08 - CONFORMITY
 # ============================================================
 
-def dq08_conformity(
-    df,
-    rule
-):
+def dq08_conformity(df, rule):
 
-    expressions = rule.get(
-        "conformity_rules",
-        {}
-    )
+    expressions = rule.get("conformity_rules", {})
 
     if not expressions:
         return "PASS", 0.0, 0
@@ -626,43 +469,32 @@ def dq08_conformity(
             failed += df.filter(
                 F.coalesce(
                     F.expr(expression),
-                    F.lit(False)
+                    F.lit(False),
                 ) == F.lit(False)
             ).count()
 
         except Exception as exc:
 
             print(
-                f"DQ08 expression skipped: "
-                f"{exc}"
+                f"DQ08 expression skipped: {exc}"
             )
 
-    percentage = (
-        failed / total * 100
-    )
+    percentage = failed / total * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ09 RANGE
+# DQ09 - RANGE
 # ============================================================
 
-def dq09_range(
-    df,
-    rule
-):
+def dq09_range(df, rule):
 
-    ranges = rule.get(
-        "range_rules",
-        {}
-    )
+    ranges = rule.get("range_rules", {})
 
     if not ranges:
         return "PASS", 0.0, 0
@@ -674,19 +506,12 @@ def dq09_range(
 
     failed = 0
 
-    for column, limits in (
-        ranges.items()
-    ):
+    for column, limits in ranges.items():
 
-        resolved = resolve_column(
-            df,
-            column
-        )
+        resolved = resolve_column(df, column)
 
         if not resolved:
-
             failed += total
-
             continue
 
         condition = None
@@ -715,50 +540,35 @@ def dq09_range(
 
             failed += df.filter(
                 F.col(resolved).isNotNull()
-                & condition
+                &
+                condition
             ).count()
 
-    percentage = (
-        failed / total * 100
-    )
+    percentage = failed / total * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ10 DUPLICATE
+# DQ10 - DUPLICATE
 # ============================================================
 
-def dq10_duplicate(
-    df,
-    rule
-):
+def dq10_duplicate(df, rule):
 
-    return dq04_uniqueness(
-        df,
-        rule
-    )
+    return dq04_uniqueness(df, rule)
 
 
 # ============================================================
-# DQ11 NULL
+# DQ11 - NULL
 # ============================================================
 
-def dq11_null(
-    df,
-    rule
-):
+def dq11_null(df, rule):
 
-    columns = rule.get(
-        "null_columns",
-        []
-    )
+    columns = rule.get("null_columns", [])
 
     if not columns:
         return "PASS", 0.0, 0
@@ -773,54 +583,39 @@ def dq11_null(
 
     for column in columns:
 
-        resolved = resolve_column(
-            df,
-            column
-        )
-
-        if not resolved:
-
-            failed += total
-            checked_columns += 1
-            continue
+        resolved = resolve_column(df, column)
 
         checked_columns += 1
+
+        if not resolved:
+            failed += total
+            continue
 
         failed += df.filter(
             F.col(resolved).isNull()
         ).count()
 
-    denominator = (
-        total
-        * max(checked_columns, 1)
+    denominator = total * max(
+        checked_columns,
+        1,
     )
 
-    percentage = (
-        failed / denominator * 100
-    )
+    percentage = failed / denominator * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ12 LENGTH
+# DQ12 - LENGTH
 # ============================================================
 
-def dq12_length(
-    df,
-    rule
-):
+def dq12_length(df, rule):
 
-    rules = rule.get(
-        "length_rules",
-        {}
-    )
+    rules = rule.get("length_rules", {})
 
     if not rules:
         return "PASS", 0.0, 0
@@ -834,13 +629,9 @@ def dq12_length(
 
     for column, limits in rules.items():
 
-        resolved = resolve_column(
-            df,
-            column
-        )
+        resolved = resolve_column(df, column)
 
         if not resolved:
-
             failed += total
             continue
 
@@ -849,18 +640,14 @@ def dq12_length(
         if "min" in limits:
 
             condition = (
-                F.length(
-                    F.col(resolved)
-                )
+                F.length(F.col(resolved))
                 < int(limits["min"])
             )
 
         if "max" in limits:
 
             maximum = (
-                F.length(
-                    F.col(resolved)
-                )
+                F.length(F.col(resolved))
                 > int(limits["max"])
             )
 
@@ -874,102 +661,69 @@ def dq12_length(
 
             failed += df.filter(
                 F.col(resolved).isNotNull()
-                & condition
+                &
+                condition
             ).count()
 
-    percentage = (
-        failed / total * 100
-    )
+    percentage = failed / total * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ13 DATA TYPE
+# DQ13 - DATA TYPE
 # ============================================================
 
-def dq13_data_type(
-    df,
-    rule
-):
+def dq13_data_type(df, rule):
 
-    expected = rule.get(
-        "expected_types",
-        {}
-    )
+    expected = rule.get("expected_types", {})
 
     if not expected:
         return "PASS", 0.0, 0
 
     actual = {
         field.name:
-            field.dataType.simpleString().lower()
+        field.dataType.simpleString().lower()
         for field in df.schema.fields
     }
 
     failed = 0
 
-    for column, expected_type in (
-        expected.items()
-    ):
+    for column, expected_type in expected.items():
 
-        resolved = resolve_column(
-            df,
-            column
-        )
+        resolved = resolve_column(df, column)
 
         if not resolved:
-
             failed += 1
             continue
 
-        actual_type = actual.get(
-            resolved,
-            ""
-        )
+        actual_type = actual.get(resolved, "")
 
         expected_type = (
             str(expected_type)
             .lower()
-            .replace(
-                "integer",
-                "int"
-            )
-            .replace(
-                "stringtype",
-                "string"
-            )
-            .replace(
-                "doubletype",
-                "double"
-            )
+            .replace("integer", "int")
+            .replace("stringtype", "string")
+            .replace("doubletype", "double")
         )
 
         if expected_type == "date":
 
-            valid = (
-                actual_type == "date"
-            )
+            valid = actual_type == "date"
 
         elif expected_type == "timestamp":
 
-            valid = (
-                actual_type.startswith(
-                    "timestamp"
-                )
-            )
+            valid = actual_type.startswith("timestamp")
 
         elif expected_type == "int":
 
             valid = actual_type in (
                 "int",
-                "integer"
+                "integer",
             )
 
         elif expected_type == "double":
@@ -977,15 +731,11 @@ def dq13_data_type(
             valid = actual_type in (
                 "double",
                 "float",
-                "decimal"
-            )
+            ) or actual_type.startswith("decimal")
 
         else:
 
-            valid = (
-                actual_type
-                == expected_type
-            )
+            valid = actual_type == expected_type
 
         if not valid:
             failed += 1
@@ -997,27 +747,19 @@ def dq13_data_type(
     )
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ14 PATTERN
+# DQ14 - PATTERN
 # ============================================================
 
-def dq14_pattern(
-    df,
-    rule
-):
+def dq14_pattern(df, rule):
 
-    patterns = rule.get(
-        "pattern_rules",
-        {}
-    )
+    patterns = rule.get("pattern_rules", {})
 
     if not patterns:
         return "PASS", 0.0, 0
@@ -1029,17 +771,11 @@ def dq14_pattern(
 
     failed = 0
 
-    for column, pattern in (
-        patterns.items()
-    ):
+    for column, pattern in patterns.items():
 
-        resolved = resolve_column(
-            df,
-            column
-        )
+        resolved = resolve_column(df, column)
 
         if not resolved:
-
             failed += total
             continue
 
@@ -1049,32 +785,22 @@ def dq14_pattern(
             ~F.col(resolved).rlike(pattern)
         ).count()
 
-    percentage = (
-        failed / total * 100
-    )
+    percentage = failed / total * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ15 BUSINESS RULE
+# DQ15 - BUSINESS RULE
 # ============================================================
 
-def dq15_business_rule(
-    df,
-    rule
-):
+def dq15_business_rule(df, rule):
 
-    expressions = rule.get(
-        "business_rules",
-        {}
-    )
+    expressions = rule.get("business_rules", {})
 
     if not expressions:
         return "PASS", 0.0, 0
@@ -1093,32 +819,27 @@ def dq15_business_rule(
             failed += df.filter(
                 F.coalesce(
                     F.expr(expression),
-                    F.lit(False)
+                    F.lit(False),
                 ) == F.lit(False)
             ).count()
 
         except Exception as exc:
 
             print(
-                f"DQ15 expression skipped: "
-                f"{exc}"
+                f"DQ15 expression skipped: {exc}"
             )
 
-    percentage = (
-        failed / total * 100
-    )
+    percentage = failed / total * 100
 
     return (
-        status_from_percentage(
-            percentage
-        ),
+        status_from_percentage(percentage),
         percentage,
-        failed
+        failed,
     )
 
 
 # ============================================================
-# DQ16 VOLUME
+# DQ16 - VOLUME
 # ============================================================
 
 def dq16_volume(
@@ -1127,53 +848,34 @@ def dq16_volume(
     catalog,
     schema,
     table,
-    cfg
+    cfg,
 ):
 
     current_count = df.count()
 
     if current_count == 0:
+        return "FAIL", 100.0, current_count
 
-        return (
-            "FAIL",
-            100.0,
-            current_count
-        )
+    audit_schema = cfg["framework"]["audit_schema"]
 
-    audit_schema = cfg[
-        "framework"
-    ][
-        "audit_schema"
-    ]
-
-    summary_table_name = cfg[
-        "output_tables"
-    ][
-        "summary"
-    ]
+    summary_table_name = cfg["output_tables"]["summary"]
 
     audit_table = (
-        f"{catalog}."
-        f"{audit_schema}."
-        f"{summary_table_name}"
+        f"{catalog}.{audit_schema}.{summary_table_name}"
     )
 
     try:
 
-        if not spark.catalog.tableExists(
-            audit_table
-        ):
+        if not spark.catalog.tableExists(audit_table):
 
             return (
                 "PASS",
                 0.0,
-                current_count
+                current_count,
             )
 
         previous = (
-            spark.table(
-                audit_table
-            )
+            spark.table(audit_table)
             .filter(
                 (F.col("catalog") == catalog)
                 &
@@ -1182,39 +884,24 @@ def dq16_volume(
                 (F.col("table") == table)
             )
             .orderBy(
-                F.col(
-                    "run_timestamp"
-                ).desc()
+                F.col("run_timestamp").desc()
             )
             .limit(1)
             .collect()
         )
 
         if not previous:
-
-            return (
-                "PASS",
-                0.0,
-                current_count
-            )
+            return "PASS", 0.0, current_count
 
         previous_count = int(
             previous[0]["row_count"]
         )
 
         if previous_count == 0:
-
-            return (
-                "PASS",
-                0.0,
-                current_count
-            )
+            return "PASS", 0.0, current_count
 
         variance = (
-            abs(
-                current_count
-                - previous_count
-            )
+            abs(current_count - previous_count)
             / previous_count
             * 100
         )
@@ -1222,26 +909,21 @@ def dq16_volume(
         threshold = float(
             cfg["framework"].get(
                 "volume_default_variance_pct",
-                30
+                30,
             )
         )
 
         if variance <= 15:
-
             status = "PASS"
-
         elif variance <= threshold:
-
             status = "WARNING"
-
         else:
-
             status = "FAIL"
 
         return (
             status,
             variance,
-            current_count
+            current_count,
         )
 
     except Exception as exc:
@@ -1253,13 +935,9 @@ def dq16_volume(
         return (
             "PASS",
             0.0,
-            current_count
+            current_count,
         )
 
-
-# ============================================================
-# SCORE
-# ============================================================
 
 # ============================================================
 # SCORE
@@ -1267,39 +945,69 @@ def dq16_volume(
 
 def calculate_score(
     cfg,
-    results
+    results,
+    effective_weights=None,
 ):
+    """
+    Weighted DQ score.
+
+    PASS    = 1.0
+    WARNING = 0.5
+    FAIL    = 0.0
+    SKIPPED = excluded
+
+    Dynamic weights are supplied by weight_resolver.
+    YAML default_weight remains the fallback.
+    """
 
     total_weight = 0.0
     earned_weight = 0.0
 
+    score_map = {
+        "PASS": 1.0,
+        "WARNING": 0.5,
+        "FAIL": 0.0,
+    }
+
     for rule in cfg["dq_rules"]:
 
-        if not rule.get(
-            "enabled",
-            True
-        ):
+        if not rule.get("enabled", True):
             continue
 
         dq_id = rule["id"]
 
-        weight = float(
-            rule.get(
-                "default_weight",
-                0
+        status = results.get(dq_id)
+
+        if status == "SKIPPED":
+            continue
+
+        if effective_weights:
+            weight = float(
+                effective_weights.get(
+                    dq_id,
+                    rule.get("default_weight", 0),
+                )
             )
-        )
+        else:
+            weight = float(
+                rule.get(
+                    "default_weight",
+                    0,
+                )
+            )
 
         total_weight += weight
 
-        if results.get(
-            dq_id
-        ) == "PASS":
+        result_score = score_map.get(
+            status,
+            0.0,
+        )
 
-            earned_weight += weight
+        earned_weight += (
+            result_score * weight
+        )
 
     if total_weight == 0:
-
         return 0.0
 
     score = (
@@ -1308,15 +1016,8 @@ def calculate_score(
         * 100
     )
 
-    return round(
-        score,
-        2
-    )
+    return round(score, 2)
 
-
-# ============================================================
-# RUN ALL DQ CHECKS
-# ============================================================
 
 # ============================================================
 # RUN ALL DQ CHECKS
@@ -1328,31 +1029,23 @@ def run_all_dq(
     catalog,
     schema,
     table,
-    cfg
+    cfg,
 ):
 
     table_rule = get_table_rule(
         cfg,
         catalog,
         schema,
-        table
+        table,
     )
 
     results = {}
     details = []
 
-    # --------------------------------------------------------
-    # GLOBAL DQ RULE CONFIGURATION
-    # --------------------------------------------------------
-
     global_rules = {
         rule["id"]: rule
         for rule in cfg["dq_rules"]
     }
-
-    # --------------------------------------------------------
-    # MERGE GLOBAL RULE + TABLE-SPECIFIC CONFIGURATION
-    # --------------------------------------------------------
 
     merged_rules = {}
 
@@ -1362,98 +1055,48 @@ def run_all_dq(
     ]:
 
         base_rule = dict(
-            global_rules.get(
-                dq_id,
-                {}
-            )
+            global_rules.get(dq_id, {})
         )
 
-        # Table rule can contain:
-        #
-        # DQ01:
-        #   mandatory_columns: [...]
-        #
-        # OR flat configuration.
-        #
         if dq_id in table_rule:
 
-            specific = table_rule[
-                dq_id
-            ]
+            specific = table_rule[dq_id]
 
-            if isinstance(
-                specific,
-                dict
-            ):
+            if isinstance(specific, dict):
+                base_rule.update(specific)
 
-                base_rule.update(
-                    specific
-                )
-
-        # Also support table-level
-        # properties directly.
-        #
-        # Example:
-        # mandatory_columns: [...]
-        #
-        # for DQ01.
         property_map = {
-            "DQ01":
-                "mandatory_columns",
-            "DQ02":
-                "row_expressions",
-            "DQ03":
-                "allowed_values",
-            "DQ04":
-                "unique_keys",
-            "DQ05":
-                "consistency_rules",
-            "DQ07":
-                "date_columns",
-            "DQ08":
-                "conformity_rules",
-            "DQ09":
-                "range_rules",
-            "DQ10":
-                "unique_keys",
-            "DQ11":
-                "null_columns",
-            "DQ12":
-                "length_rules",
-            "DQ13":
-                "expected_types",
-            "DQ14":
-                "pattern_rules",
-            "DQ15":
-                "business_rules",
+            "DQ01": "mandatory_columns",
+            "DQ02": "row_expressions",
+            "DQ03": "allowed_values",
+            "DQ04": "unique_keys",
+            "DQ05": "consistency_rules",
+            "DQ07": "date_columns",
+            "DQ08": "conformity_rules",
+            "DQ09": "range_rules",
+            "DQ10": "unique_keys",
+            "DQ11": "null_columns",
+            "DQ12": "length_rules",
+            "DQ13": "expected_types",
+            "DQ14": "pattern_rules",
+            "DQ15": "business_rules",
         }
 
-        if dq_id in property_map:
+        property_name = property_map.get(dq_id)
 
-            property_name = (
-                property_map[dq_id]
+        if (
+            property_name
+            and property_name in table_rule
+        ):
+
+            base_rule[property_name] = (
+                table_rule[property_name]
             )
 
-            if (
-                property_name
-                in table_rule
-            ):
-
-                base_rule[
-                    property_name
-                ] = table_rule[
-                    property_name
-                ]
-
-        merged_rules[
-            dq_id
-        ] = base_rule
-
-    # --------------------------------------------------------
-    # DQ FUNCTION MAP
-    # --------------------------------------------------------
+        merged_rules[dq_id] = base_rule
 
     functions = {
+
         "DQ01": dq01_completeness,
 
         "DQ02": dq02_accuracy,
@@ -1468,7 +1111,7 @@ def run_all_dq(
             dq07_timeliness(
                 d,
                 r,
-                cfg
+                cfg,
             ),
 
         "DQ08": dq08_conformity,
@@ -1488,11 +1131,6 @@ def run_all_dq(
         "DQ15": dq15_business_rule,
     }
 
-    # --------------------------------------------------------
-    # DQ01-DQ05
-    # DQ07-DQ15
-    # --------------------------------------------------------
-
     for dq_id in [
         "DQ01",
         "DQ02",
@@ -1510,52 +1148,33 @@ def run_all_dq(
         "DQ15",
     ]:
 
-        rule_definition = (
-            global_rules.get(
-                dq_id,
-                {}
-            )
-        )
-
-        enabled = rule_definition.get(
+        enabled = global_rules.get(
+            dq_id,
+            {}
+        ).get(
             "enabled",
-            True
+            True,
         )
-
-        # ----------------------------------------------------
-        # DISABLED RULE
-        # ----------------------------------------------------
 
         if not enabled:
 
             results[dq_id] = "SKIPPED"
 
             details.append({
-                "dq_id":
-                    dq_id,
-
-                "status":
-                    "SKIPPED",
-
-                "failure_percentage":
-                    0.0,
-
-                "failed_records":
-                    0
+                "dq_id": dq_id,
+                "status": "SKIPPED",
+                "failure_percentage": 0.0,
+                "failed_records": 0,
             })
 
             continue
-
-        # ----------------------------------------------------
-        # EXECUTE RULE
-        # ----------------------------------------------------
 
         try:
 
             status, percentage, failed = (
                 functions[dq_id](
                     df,
-                    merged_rules[dq_id]
+                    merged_rules[dq_id],
                 )
             )
 
@@ -1567,39 +1186,30 @@ def run_all_dq(
             )
 
             status = "WARNING"
-
             percentage = 0.0
-
             failed = 0
 
         results[dq_id] = status
 
         details.append({
-            "dq_id":
-                dq_id,
-
-            "status":
-                status,
-
-            "failure_percentage":
-                float(percentage),
-
-            "failed_records":
-                int(failed)
+            "dq_id": dq_id,
+            "status": status,
+            "failure_percentage": float(
+                percentage
+            ),
+            "failed_records": int(
+                failed
+            ),
         })
 
     # --------------------------------------------------------
-    # DQ06 - INTEGRITY
+    # DQ06
     # --------------------------------------------------------
 
-    dq06_enabled = global_rules[
-        "DQ06"
-    ].get(
+    if global_rules["DQ06"].get(
         "enabled",
-        True
-    )
-
-    if dq06_enabled:
+        True,
+    ):
 
         try:
 
@@ -1610,7 +1220,7 @@ def run_all_dq(
                     catalog,
                     schema,
                     table,
-                    cfg
+                    cfg,
                 )
             )
 
@@ -1628,17 +1238,14 @@ def run_all_dq(
         results["DQ06"] = status
 
         details.append({
-            "dq_id":
-                "DQ06",
-
-            "status":
-                status,
-
-            "failure_percentage":
-                float(percentage),
-
-            "failed_records":
-                int(failed)
+            "dq_id": "DQ06",
+            "status": status,
+            "failure_percentage": float(
+                percentage
+            ),
+            "failed_records": int(
+                failed
+            ),
         })
 
     else:
@@ -1646,31 +1253,20 @@ def run_all_dq(
         results["DQ06"] = "SKIPPED"
 
         details.append({
-            "dq_id":
-                "DQ06",
-
-            "status":
-                "SKIPPED",
-
-            "failure_percentage":
-                0.0,
-
-            "failed_records":
-                0
+            "dq_id": "DQ06",
+            "status": "SKIPPED",
+            "failure_percentage": 0.0,
+            "failed_records": 0,
         })
 
     # --------------------------------------------------------
-    # DQ16 - VOLUME
+    # DQ16
     # --------------------------------------------------------
 
-    dq16_enabled = global_rules[
-        "DQ16"
-    ].get(
+    if global_rules["DQ16"].get(
         "enabled",
-        True
-    )
-
-    if dq16_enabled:
+        True,
+    ):
 
         try:
 
@@ -1681,7 +1277,7 @@ def run_all_dq(
                     catalog,
                     schema,
                     table,
-                    cfg
+                    cfg,
                 )
             )
 
@@ -1699,17 +1295,12 @@ def run_all_dq(
         results["DQ16"] = status
 
         details.append({
-            "dq_id":
-                "DQ16",
-
-            "status":
-                status,
-
-            "failure_percentage":
-                float(percentage),
-
-            "failed_records":
-                0
+            "dq_id": "DQ16",
+            "status": status,
+            "failure_percentage": float(
+                percentage
+            ),
+            "failed_records": 0,
         })
 
     else:
@@ -1717,29 +1308,20 @@ def run_all_dq(
         results["DQ16"] = "SKIPPED"
 
         details.append({
-            "dq_id":
-                "DQ16",
-
-            "status":
-                "SKIPPED",
-
-            "failure_percentage":
-                0.0,
-
-            "failed_records":
-                0
+            "dq_id": "DQ16",
+            "status": "SKIPPED",
+            "failure_percentage": 0.0,
+            "failed_records": 0,
         })
 
     return results, details
+
 
 # ============================================================
 # OVERALL STATUS
 # ============================================================
 
-def overall_status(
-    score,
-    thresholds
-):
+def overall_status(score, thresholds):
 
     score = float(score)
 
