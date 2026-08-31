@@ -349,55 +349,6 @@ table_rules:
     date_columns: []
 
 
-relationships:
-
-  - name: campaign_master_fk
-    child_table: wmg.demo.campaign_data
-    child_column: campaign_id
-    parent_table: wmg.demo.campaign_master
-    parent_column: campaign_id
-    nullable_allowed: false
-
-
-profiling:
-
-  enabled: true
-  top_values: 10
-  candidate_null_rate_pct: 1
-
-
-ml_weighting:
-
-  enabled: true
-
-  incident_table: wmg.demo.incident_history
-
-  feature_columns:
-    - incident_count
-    - avg_mttd_minutes
-    - avg_mtta_minutes
-    - avg_mttr_minutes
-    - aidr_pct
-    - severity_score
-
-  target_column: total_rev_impact
-
-  output_table: wmg.dqx_audit.dq_dynamic_weights
-
-  min_training_rows: 10
-
-
-output_tables:
-
-  audit: dq_audit_results
-  summary: dq_summary
-  quarantine: dq_quarantine
-  profiling: dq_profile
-  candidates: dq_rule_candidates
-  kpi: dq_kpis
-  weights: dq_dynamic_weights
-  pipeline_runs: dq_pipeline_runs
-
   wmg.demo.transactions:
 
     unique_keys:
@@ -471,7 +422,7 @@ output_tables:
         min: 1
         max: 100
 
-    pattern_rules: { }
+    pattern_rules: {}
 
     conformity_rules:
 
@@ -481,13 +432,12 @@ output_tables:
 
       amount_non_negative: "amount >= 0"
 
-    consistency_rules: { }
+    consistency_rules: {}
 
-    business_rules: { }
+    business_rules: {}
 
     date_columns:
       - transaction_date
-
 
 
   wmg.demo.emea_and_global_data_combined_2_1:
@@ -644,3 +594,126 @@ output_tables:
 
     date_columns:
       - Day
+
+
+relationships:
+
+  - name: campaign_master_fk
+    child_table: wmg.demo.campaign_data
+    child_column: campaign_id
+    parent_table: wmg.demo.campaign_master
+    parent_column: campaign_id
+    nullable_allowed: false
+
+
+profiling:
+
+  enabled: true
+  top_values: 10
+  candidate_null_rate_pct: 1
+
+
+# ============================================================
+# KPI METRICS
+# ============================================================
+
+# ============================================================
+# CHANGES TO config/dq_rules.yml
+#
+# 1. label_kpi_map codes CHANGED from K01/K06/K10/K03/K13/K04/K07
+#    to DQ01/DQ06/DQ10/DQ03/DQ13/DQ07 - aligned with your existing
+#    dq_rules.yml "id" fields. This is what lets weight_resolver.py
+#    match a dynamic KPI weight directly onto a DQ rule by id.
+#    Labels with no real DQ-dimension equivalent (Availability) use
+#    an OPS-prefixed code instead - purely informational, correctly
+#    excluded from DQ weight overrides.
+#
+# 2. Added incident_report_table key for the new whiteboard-style
+#    flat report.
+#
+# REPLACE your existing kpi_metrics: block with this ENTIRE block.
+# ============================================================
+
+kpi_metrics:
+  enabled: true
+
+  incident_log_table: "wmg.dqx_audit.dq_incident_log"
+
+  incident_report_table: "wmg.dqx_audit.dq_kpi_incident_report"
+
+  severity_weights:
+    duration_weight: 0.5
+    revenue_weight: 0.5
+
+  # kpi codes now match dq_rules.yml "id" values wherever a real
+  # correspondence exists (see comment above). REVIEW before relying
+  # on this for a live demo - still inferred from your 5 example rows.
+  label_kpi_map:
+    "Null Primary Keys":            { kpi: "DQ01", kpi_name: "Completeness", dimension: "completeness" }
+    "Data Quality Breach":          { kpi: "DQ01", kpi_name: "Completeness", dimension: "completeness" }
+    "FK Mismatch":                  { kpi: "DQ06", kpi_name: "Integrity",    dimension: "integrity" }
+    "Duplicate Check Failure":      { kpi: "DQ10", kpi_name: "Duplicate",    dimension: "duplicate" }
+    "Format/Regex Failure":         { kpi: "DQ03", kpi_name: "Validity",     dimension: "validity" }
+    "Type Conversion Error":        { kpi: "DQ13", kpi_name: "Data Type",    dimension: "data_type" }
+    "Code Failure / Schema Shift":  { kpi: "OPS01", kpi_name: "Availability", dimension: "availability" }
+    "Network / Timeout":            { kpi: "OPS01", kpi_name: "Availability", dimension: "availability" }
+    "Resource Contention":          { kpi: "DQ07", kpi_name: "Timeliness",   dimension: "timeliness" }
+    "SLA Latency Breach":           { kpi: "DQ07", kpi_name: "Timeliness",   dimension: "timeliness" }
+
+  default_kpi:
+    kpi: "OPS99"
+    kpi_name: "Unclassified"
+    dimension: "unclassified"
+
+
+# ============================================================
+# NO CHANGE to ml_weighting: - leave exactly as-is, it already
+# points at the right table with the right column names.
+# ============================================================
+
+
+# ============================================================
+# EXISTING ML WEIGHTING
+# ============================================================
+#
+# DO NOT CHANGE THIS BLOCK at this stage.
+# It continues to use wmg.demo.incident_history.
+#
+# The existing src/ml_weighting.py will be handled separately.
+# ============================================================
+
+ml_weighting:
+
+  enabled: true
+
+  incident_table: wmg.demo.incident_history
+
+  feature_columns:
+    - incident_count
+    - avg_mttd_minutes
+    - avg_mtta_minutes
+    - avg_mttr_minutes
+    - aidr_pct
+    - severity_score
+
+  target_column: total_rev_impact
+
+  output_table: wmg.dqx_audit.dq_dynamic_weights
+
+  min_training_rows: 10
+
+
+# ============================================================
+# OUTPUT TABLES
+# ============================================================
+
+output_tables:
+
+  audit: dq_audit_results
+  summary: dq_summary
+  quarantine: dq_quarantine
+  profiling: dq_profile
+  candidates: dq_rule_candidates
+  kpi: dq_kpis
+  weights: dq_dynamic_weights
+  pipeline_runs: dq_pipeline_runs
