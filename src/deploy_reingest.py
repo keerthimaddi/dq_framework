@@ -1,3 +1,8 @@
+import pathlib
+
+base = "/Workspace/Users/keerthi.maddi@mediamint.com/dq_framework/src"
+
+reingest_content = '''
 # ============================================================
 # RE-INGESTION MODULE
 # Requirement 01 Section 17: Quarantine -> Correction -> Re-validation -> Silver
@@ -160,3 +165,20 @@ def run_reingestion(spark, cfg, tables):
 
     print(f"Re-ingestion complete. Total rows promoted to Silver: {total_promoted}")
     return total_promoted
+'''
+
+target = pathlib.Path(base + "/reingest.py")
+print("BEFORE - current deployed file:")
+try:
+    print(target.read_text())
+except Exception as e:
+    print(f"Could not read existing file: {e}")
+print("=" * 70)
+
+target.write_text(reingest_content)
+print("reingest.py (re)written.")
+
+import subprocess
+r = subprocess.run(["grep", "-n", "^def ", str(target)], capture_output=True, text=True)
+print("Functions now in deployed reingest.py:")
+print(r.stdout)
