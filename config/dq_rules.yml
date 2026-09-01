@@ -1,3 +1,8 @@
+# ============================================================
+# CAMPAIGN DATA QUALITY FRAMEWORK
+# CONFIGURATION
+# ============================================================
+
 framework:
   name: Campaign Data Quality Framework
   catalog: wmg
@@ -25,16 +30,29 @@ framework:
   volume_default_variance_pct: 30
 
 
+# ============================================================
+# OVERALL SCORE THRESHOLDS
+# ============================================================
+
 overall_thresholds:
   pass: 90
   warning: 75
   fail: 0
 
 
+# ============================================================
+# QUALITY GATE
+# ============================================================
+
 quality_gate:
   enabled: true
   silver_min_score: 90
 
+
+# ============================================================
+# DQ RULES
+# Total default weight = 100
+# ============================================================
 
 dq_rules:
 
@@ -151,7 +169,15 @@ dq_rules:
     severity: medium
 
 
+# ============================================================
+# TABLE RULES
+# ============================================================
+
 table_rules:
+
+  # ----------------------------------------------------------
+  # CAMPAIGN DATA
+  # ----------------------------------------------------------
 
   wmg.demo.campaign_data:
 
@@ -273,6 +299,10 @@ table_rules:
       - event_date
 
 
+  # ----------------------------------------------------------
+  # CAMPAIGN MASTER
+  # ----------------------------------------------------------
+
   wmg.demo.campaign_master:
 
     unique_keys:
@@ -306,6 +336,10 @@ table_rules:
     business_rules: {}
     date_columns: []
 
+
+  # ----------------------------------------------------------
+  # INCIDENT HISTORY
+  # ----------------------------------------------------------
 
   wmg.demo.incident_history:
 
@@ -348,6 +382,10 @@ table_rules:
     business_rules: {}
     date_columns: []
 
+
+  # ----------------------------------------------------------
+  # TRANSACTIONS
+  # ----------------------------------------------------------
 
   wmg.demo.transactions:
 
@@ -433,12 +471,15 @@ table_rules:
       amount_non_negative: "amount >= 0"
 
     consistency_rules: {}
-
     business_rules: {}
 
     date_columns:
       - transaction_date
 
+
+  # ----------------------------------------------------------
+  # EMEA / GLOBAL DATA
+  # ----------------------------------------------------------
 
   wmg.demo.emea_and_global_data_combined_2_1:
 
@@ -589,12 +630,15 @@ table_rules:
       spend_non_negative: "`Amount spent (USD)` >= 0"
 
     consistency_rules: {}
-
     business_rules: {}
 
     date_columns:
       - Day
 
+
+# ============================================================
+# TABLE RELATIONSHIPS
+# ============================================================
 
 relationships:
 
@@ -605,6 +649,10 @@ relationships:
     parent_column: campaign_id
     nullable_allowed: false
 
+
+# ============================================================
+# PROFILING
+# ============================================================
 
 profiling:
 
@@ -617,69 +665,80 @@ profiling:
 # KPI METRICS
 # ============================================================
 
-# ============================================================
-# CHANGES TO config/dq_rules.yml
-#
-# 1. label_kpi_map codes CHANGED from K01/K06/K10/K03/K13/K04/K07
-#    to DQ01/DQ06/DQ10/DQ03/DQ13/DQ07 - aligned with your existing
-#    dq_rules.yml "id" fields. This is what lets weight_resolver.py
-#    match a dynamic KPI weight directly onto a DQ rule by id.
-#    Labels with no real DQ-dimension equivalent (Availability) use
-#    an OPS-prefixed code instead - purely informational, correctly
-#    excluded from DQ weight overrides.
-#
-# 2. Added incident_report_table key for the new whiteboard-style
-#    flat report.
-#
-# REPLACE your existing kpi_metrics: block with this ENTIRE block.
-# ============================================================
-
 kpi_metrics:
+
   enabled: true
 
-  incident_log_table: "wmg.dqx_audit.dq_incident_log"
+  incident_log_table: wmg.dqx_audit.dq_incident_log
 
-  incident_report_table: "wmg.dqx_audit.dq_kpi_incident_report"
+  incident_report_table: wmg.dqx_audit.dq_kpi_incident_report
 
   severity_weights:
+
     duration_weight: 0.5
     revenue_weight: 0.5
 
-  # kpi codes now match dq_rules.yml "id" values wherever a real
-  # correspondence exists (see comment above). REVIEW before relying
-  # on this for a live demo - still inferred from your 5 example rows.
   label_kpi_map:
-    "Null Primary Keys":            { kpi: "DQ01", kpi_name: "Completeness", dimension: "completeness" }
-    "Data Quality Breach":          { kpi: "DQ01", kpi_name: "Completeness", dimension: "completeness" }
-    "FK Mismatch":                  { kpi: "DQ06", kpi_name: "Integrity",    dimension: "integrity" }
-    "Duplicate Check Failure":      { kpi: "DQ10", kpi_name: "Duplicate",    dimension: "duplicate" }
-    "Format/Regex Failure":         { kpi: "DQ03", kpi_name: "Validity",     dimension: "validity" }
-    "Type Conversion Error":        { kpi: "DQ13", kpi_name: "Data Type",    dimension: "data_type" }
-    "Code Failure / Schema Shift":  { kpi: "OPS01", kpi_name: "Availability", dimension: "availability" }
-    "Network / Timeout":            { kpi: "OPS01", kpi_name: "Availability", dimension: "availability" }
-    "Resource Contention":          { kpi: "DQ07", kpi_name: "Timeliness",   dimension: "timeliness" }
-    "SLA Latency Breach":           { kpi: "DQ07", kpi_name: "Timeliness",   dimension: "timeliness" }
+
+    "Null Primary Keys":
+      kpi: DQ01
+      kpi_name: Completeness
+      dimension: completeness
+
+    "Data Quality Breach":
+      kpi: DQ01
+      kpi_name: Completeness
+      dimension: completeness
+
+    "FK Mismatch":
+      kpi: DQ06
+      kpi_name: Integrity
+      dimension: integrity
+
+    "Duplicate Check Failure":
+      kpi: DQ10
+      kpi_name: Duplicate
+      dimension: duplicate
+
+    "Format/Regex Failure":
+      kpi: DQ03
+      kpi_name: Validity
+      dimension: validity
+
+    "Type Conversion Error":
+      kpi: DQ13
+      kpi_name: Data Type
+      dimension: data_type
+
+    "Code Failure / Schema Shift":
+      kpi: OPS01
+      kpi_name: Availability
+      dimension: availability
+
+    "Network / Timeout":
+      kpi: OPS01
+      kpi_name: Availability
+      dimension: availability
+
+    "Resource Contention":
+      kpi: DQ07
+      kpi_name: Timeliness
+      dimension: timeliness
+
+    "SLA Latency Breach":
+      kpi: DQ07
+      kpi_name: Timeliness
+      dimension: timeliness
 
   default_kpi:
-    kpi: "OPS99"
-    kpi_name: "Unclassified"
-    dimension: "unclassified"
+
+    kpi: OPS99
+    kpi_name: Unclassified
+    dimension: unclassified
 
 
 # ============================================================
-# NO CHANGE to ml_weighting: - leave exactly as-is, it already
-# points at the right table with the right column names.
-# ============================================================
-
-
-# ============================================================
-# EXISTING ML WEIGHTING
-# ============================================================
-#
-# DO NOT CHANGE THIS BLOCK at this stage.
-# It continues to use wmg.demo.incident_history.
-#
-# The existing src/ml_weighting.py will be handled separately.
+# ML DYNAMIC WEIGHTING
 # ============================================================
 
 ml_weighting:
@@ -689,6 +748,7 @@ ml_weighting:
   incident_table: wmg.demo.incident_history
 
   feature_columns:
+
     - incident_count
     - avg_mttd_minutes
     - avg_mtta_minutes
