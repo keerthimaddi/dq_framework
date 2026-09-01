@@ -1,3 +1,8 @@
+import pathlib
+
+base = "/Workspace/Users/keerthi.maddi@mediamint.com/dq_framework/src"
+
+kpi_content = '''
 # ============================================================
 # KPI METRICS MODULE
 # Requirement 02 - Steps 1-4 + whiteboard-style final report
@@ -460,3 +465,11 @@ def build_incident_level_kpi_report(spark, cfg):
     print(f"Incident-level KPI report written: {report_table}")
     spark.table(report_table).orderBy("date").show(truncate=False)
     return report
+'''
+
+pathlib.Path(base + "/kpi_metrics.py").write_text(kpi_content)
+print("kpi_metrics.py written.")
+import subprocess
+r = subprocess.run(["grep", "-n", "needs_overwrite"], input=open(base + "/kpi_metrics.py").read(), capture_output=True, text=True)
+print("Verification grep:")
+print(r.stdout)

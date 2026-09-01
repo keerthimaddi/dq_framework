@@ -9,11 +9,7 @@ from datetime import datetime
 from pyspark.sql import SparkSession
 
 from src.rule_loader import load_config
-
-from src.metadata_discovery import (
-    discover_source_tables,
-)
-
+from src.metadata_discovery import discover_source_tables
 from src.dq_engine import (
     run_all_dq,
     calculate_score,
@@ -39,18 +35,11 @@ from src.lakehouse import (
     create_quarantine,
 )
 
-from src.quarantine_rules import (
-    build_failure_condition,
-)
+from src.quarantine_rules import build_failure_condition
 
-from src.ml_weighting import (
-    train_dynamic_weights,
-)
+from src.ml_weighting import train_dynamic_weights
 
-from src.auto_rules import (
-    build_auto_rule,
-    merge_rules,
-)
+from src.auto_rules import build_auto_rule, merge_rules
 
 from src.kpi_metrics import (
     run_kpi_metrics,
@@ -58,33 +47,35 @@ from src.kpi_metrics import (
     build_incident_level_kpi_report,
 )
 
-from src.weight_resolver import (
-    build_effective_weights,
-)
+from src.weight_resolver import build_effective_weights
 
-from src.reingest import (
-    run_reingestion,
-)
+from src.reingest import run_reingestion
 
 
 # ============================================================
-# SPARK
+# SPARK SESSION
 # ============================================================
 
 def get_spark_session():
 
-    return (
-        SparkSession
-        .builder
-        .appName(
-            "Campaign Data Quality Framework"
-        )
-        .getOrCreate()
-    )
+    """
+    Use the Spark session already managed by Databricks.
+
+    Do not create a separate Databricks Connect serverless
+    session when the framework is being executed directly
+    inside a Databricks notebook.
+    """
+
+    spark = SparkSession.getActiveSession()
+
+    if spark is None:
+        spark = SparkSession.builder.getOrCreate()
+
+    return spark
 
 
 # ============================================================
-# CONFIGURATION
+# PRINT CONFIGURATION
 # ============================================================
 
 def print_configuration(cfg):
@@ -93,113 +84,57 @@ def print_configuration(cfg):
 
     print()
     print("=" * 70)
-    print(
-        "CAMPAIGN DATA QUALITY FRAMEWORK"
-    )
+    print("CAMPAIGN DATA QUALITY FRAMEWORK")
     print("=" * 70)
 
-    print(
-        f"Catalog           : "
-        f"{framework['catalog']}"
-    )
-
-    print(
-        f"Audit Schema      : "
-        f"{framework['audit_schema']}"
-    )
-
-    print(
-        f"Candidate Schema  : "
-        f"{framework['candidate_schema']}"
-    )
-
-    print(
-        f"Quality Gate      : "
-        f"{cfg['quality_gate']}"
-    )
-
-    print(
-        f"Overall Thresholds: "
-        f"{cfg['overall_thresholds']}"
-    )
-
-    print(
-        f"ML Weighting      : "
-        f"{cfg['ml_weighting']}"
-    )
+    print(f"Catalog           : {framework['catalog']}")
+    print(f"Audit Schema      : {framework['audit_schema']}")
+    print(f"Candidate Schema  : {framework['candidate_schema']}")
+    print(f"Quality Gate      : {cfg['quality_gate']}")
+    print(f"Overall Thresholds: {cfg['overall_thresholds']}")
+    print(f"ML Weighting      : {cfg['ml_weighting']}")
+    print()
 
 
 # ============================================================
 # PROCESS ONE TABLE
 # ============================================================
 
-def process_table(
-    spark,
-    cfg,
-    catalog,
-    schema,
-    table,
-    effective_weights,
-):
+def process_table(spark, cfg, catalog, schema, table):
 
-    source = (
-        f"{catalog}.{schema}.{table}"
-    )
-
-    run_id = str(
-        uuid.uuid4()
-    )
+    source = f"{catalog}.{schema}.{table}"
+    run_id = str(uuid.uuid4())
 
     print()
     print("=" * 70)
-    print(
-        f"PROCESSING TABLE: {source}"
-    )
+    print(f"PROCESSING TABLE: {source}")
     print("=" * 70)
 
     run_timestamp = datetime.now()
 
     # --------------------------------------------------------
-    # LOAD
+    # LOAD TABLE
     # --------------------------------------------------------
 
     try:
-
-        df = spark.table(
-            source
-        )
+        df = spark.table(source)
 
     except Exception as exc:
-
-        print(
-            f"ERROR loading {source}: "
-            f"{exc}"
-        )
-
+        print(f"ERROR loading table {source}: {exc}")
         return None, [], [], []
 
     row_count = df.count()
+    column_count = len(df.columns)
 
-    column_count = len(
-        df.columns
-    )
-
-    print(
-        f"Rows    : {row_count}"
-    )
-
-    print(
-        f"Columns : {column_count}"
-    )
+    print(f"Rows    : {row_count}")
+    print(f"Columns : {column_count}")
 
     # --------------------------------------------------------
-    # PROFILING
+    # PROFILE TABLE
     # --------------------------------------------------------
 
     print()
-    print(
-        "Running data profiling..."
-    )
+    print("Running data profiling...")
 
     try:
 
@@ -210,61 +145,45 @@ def process_table(
             table,
         )
 
-        candidate_rows = (
-            create_rule_candidates(
-                profile_rows
-            )
+        candidate_rows = create_rule_candidates(
+            profile_rows
         )
 
-        print(
-            f"Profile rows    : "
-            f"{len(profile_rows)}"
-        )
-
-        print(
-            f"Rule candidates : "
-            f"{len(candidate_rows)}"
-        )
+        print(f"Profile rows    : {len(profile_rows)}")
+        print(f"Rule candidates : {len(candidate_rows)}")
 
     except Exception as exc:
 
         print(
-            f"Profiling error: {exc}"
+            f"Profiling error for {source}: {exc}"
         )
 
         profile_rows = []
-
         candidate_rows = []
 
     # --------------------------------------------------------
-    # BRONZE
+    # WRITE BRONZE
     # --------------------------------------------------------
 
     print()
-    print(
-        "Writing Bronze..."
-    )
+    print("Writing Bronze...")
 
-    bronze_df, column_mapping = (
-        write_bronze(
-            spark,
-            df,
-            catalog,
-            schema,
-            table,
-            cfg,
-        )
+    bronze_df, column_mapping = write_bronze(
+        spark,
+        df,
+        catalog,
+        schema,
+        table,
+        cfg,
     )
 
     # --------------------------------------------------------
-    # AUTO RULE + MANUAL RULE
+    # BUILD EFFECTIVE RULE
+    # AUTO + MANUAL
     # --------------------------------------------------------
 
     print()
-    print(
-        "Deriving DQ rules from "
-        "table metadata..."
-    )
+    print("Deriving DQ rules from table metadata...")
 
     auto_rule = build_auto_rule(
         spark,
@@ -289,34 +208,30 @@ def process_table(
 
     print(
         f"Auto-derived: "
-        f"{len(auto_rule.get('mandatory_columns', []))} "
-        f"mandatory cols, "
-        f"{len(auto_rule.get('unique_keys', []))} "
-        f"key candidate(s), "
-        f"{len(auto_rule.get('range_rules', {}))} "
-        f"range rule(s), "
-        f"{len(auto_rule.get('pattern_rules', {}))} "
-        f"pattern rule(s)"
+        f"{len(auto_rule.get('mandatory_columns', []))} mandatory cols, "
+        f"{len(auto_rule.get('unique_keys', []))} key candidate(s), "
+        f"{len(auto_rule.get('range_rules', {}))} numeric range rule(s), "
+        f"{len(auto_rule.get('pattern_rules', {}))} pattern rule(s)"
+        + (
+            " | manual overrides applied"
+            if manual_rule
+            else " | no manual table_rules entry (fully automatic)"
+        )
     )
 
     table_cfg = dict(cfg)
 
     table_cfg["table_rules"] = {
-        **cfg.get(
-            "table_rules",
-            {}
-        ),
+        **cfg.get("table_rules", {}),
         source: effective_rule,
     }
 
     # --------------------------------------------------------
-    # DQ
+    # RUN DQ CHECKS
     # --------------------------------------------------------
 
     print()
-    print(
-        "Running DQ01 - DQ16..."
-    )
+    print("Running DQ01 - DQ16...")
 
     results, details = run_all_dq(
         spark,
@@ -329,14 +244,12 @@ def process_table(
 
     print()
     print("-" * 70)
-    print(
-        f"DQ RESULTS: {source}"
-    )
+    print(f"DQ RESULTS: {source}")
     print("-" * 70)
 
     for detail in sorted(
         details,
-        key=lambda x: x["dq_id"],
+        key=lambda d: d["dq_id"]
     ):
 
         print(
@@ -349,13 +262,12 @@ def process_table(
         )
 
     # --------------------------------------------------------
-    # DYNAMIC WEIGHTED SCORE
+    # CALCULATE SCORE
     # --------------------------------------------------------
 
     score = calculate_score(
         cfg,
         results,
-        effective_weights,
     )
 
     status = overall_status(
@@ -364,23 +276,14 @@ def process_table(
     )
 
     print()
-    print(
-        f"Overall Score : "
-        f"{score:.2f}%"
-    )
-
-    print(
-        f"Overall Status: "
-        f"{status}"
-    )
+    print(f"Overall Score : {score:.2f}%")
+    print(f"Overall Status: {status}")
 
     # --------------------------------------------------------
     # QUALITY GATE
     # --------------------------------------------------------
 
-    quality_gate = cfg[
-        "quality_gate"
-    ]
+    quality_gate = cfg["quality_gate"]
 
     gate_threshold = float(
         quality_gate.get(
@@ -407,8 +310,7 @@ def process_table(
         gate_status = "FAILED"
 
     print(
-        f"Quality Gate  : "
-        f"{gate_status}"
+        f"Quality Gate  : {gate_status}"
     )
 
     print(
@@ -421,28 +323,22 @@ def process_table(
     # --------------------------------------------------------
 
     print()
-    print(
-        "Evaluating rows for quarantine..."
+    print("Evaluating rows for quarantine...")
+
+    failure_condition = build_failure_condition(
+        bronze_df,
+        effective_rule,
     )
 
-    failure_condition = (
-        build_failure_condition(
-            bronze_df,
-            effective_rule,
-        )
-    )
-
-    quarantined_count = (
-        create_quarantine(
-            spark,
-            bronze_df,
-            failure_condition,
-            catalog,
-            schema,
-            table,
-            cfg,
-            run_id,
-        )
+    quarantined_count = create_quarantine(
+        spark,
+        bronze_df,
+        failure_condition,
+        catalog,
+        schema,
+        table,
+        cfg,
+        run_id,
     )
 
     # --------------------------------------------------------
@@ -450,9 +346,7 @@ def process_table(
     # --------------------------------------------------------
 
     print()
-    print(
-        "Evaluating Silver promotion..."
-    )
+    print("Evaluating Silver promotion...")
 
     silver_created = create_silver(
         spark,
@@ -472,9 +366,7 @@ def process_table(
     if silver_created:
 
         print()
-        print(
-            "Evaluating Gold promotion..."
-        )
+        print("Evaluating Gold promotion...")
 
         gold_created = create_gold(
             spark,
@@ -486,23 +378,20 @@ def process_table(
         )
 
     # --------------------------------------------------------
-    # SUMMARY
+    # BUILD SUMMARY
     # --------------------------------------------------------
 
     summary_row = {
+
         "catalog": catalog,
         "schema": schema,
         "table": table,
+
         "run_id": run_id,
         "run_timestamp": run_timestamp,
 
-        "row_count": int(
-            row_count
-        ),
-
-        "column_count": int(
-            column_count
-        ),
+        "row_count": int(row_count),
+        "column_count": int(column_count),
 
         "dq01": results.get(
             "DQ01",
@@ -584,16 +473,10 @@ def process_table(
             "WARNING",
         ),
 
-        "dq_score": float(
-            score
-        ),
-
-        "total_score": float(
-            score
-        ),
+        "dq_score": float(score),
+        "total_score": float(score),
 
         "overall_status": status,
-
         "quality_gate": gate_status,
 
         "quarantined_records": int(
@@ -609,35 +492,32 @@ def process_table(
         ),
     }
 
+    # --------------------------------------------------------
+    # DETAIL ROWS
+    # --------------------------------------------------------
+
     detail_rows = []
 
     for detail in details:
 
         detail_rows.append({
+
             "catalog": catalog,
             "schema": schema,
             "table": table,
+
             "run_id": run_id,
             "run_timestamp": run_timestamp,
 
-            "dq_id": detail[
-                "dq_id"
-            ],
-
-            "status": detail[
-                "status"
-            ],
+            "dq_id": detail["dq_id"],
+            "status": detail["status"],
 
             "failure_percentage": float(
-                detail[
-                    "failure_percentage"
-                ]
+                detail["failure_percentage"]
             ),
 
             "failed_records": int(
-                detail[
-                    "failed_records"
-                ]
+                detail["failed_records"]
             ),
         })
 
@@ -657,29 +537,25 @@ def main():
 
     print()
     print("=" * 70)
-    print(
-        "STARTING CAMPAIGN DATA QUALITY PIPELINE"
-    )
+    print("STARTING CAMPAIGN DATA QUALITY PIPELINE")
     print("=" * 70)
 
     # --------------------------------------------------------
-    # CONFIG
+    # LOAD CONFIG
     # --------------------------------------------------------
 
     cfg = load_config()
 
-    print_configuration(
-        cfg
-    )
+    print_configuration(cfg)
 
     # --------------------------------------------------------
-    # SPARK
+    # GET DATABRICKS SPARK SESSION
     # --------------------------------------------------------
 
     spark = get_spark_session()
 
     # --------------------------------------------------------
-    # FRAMEWORK SCHEMAS
+    # CREATE FRAMEWORK SCHEMAS
     # --------------------------------------------------------
 
     create_framework_schemas(
@@ -687,16 +563,33 @@ def main():
         cfg,
     )
 
-    # ========================================================
-    # STEP 1
+    # --------------------------------------------------------
+    # DISCOVER SOURCE TABLES
+    #
+    # IMPORTANT:
+    # Discovery happens before KPI processing so that we have
+    # confirmed access to the source catalog/schema first.
+    # --------------------------------------------------------
+
+    tables = discover_source_tables(
+        spark,
+        cfg,
+    )
+
+    if not tables:
+
+        print()
+        print("No tables found for processing.")
+
+        return
+
+    # --------------------------------------------------------
     # KPI METRICS
-    # ========================================================
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print(
-        "STEP 1 - KPI METRICS"
-    )
+    print("KPI METRICS")
     print("=" * 70)
 
     try:
@@ -709,155 +602,23 @@ def main():
     except Exception as exc:
 
         print(
-            f"KPI metrics failed "
+            f"KPI metrics step failed "
             f"(non-fatal): {exc}"
         )
 
-    # ========================================================
-    # STEP 2
-    # ML STAGE A
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print(
-        "STEP 2 - ML DYNAMIC WEIGHTING"
-    )
-    print("=" * 70)
-
-    try:
-
-        train_dynamic_weights(
-            spark,
-            cfg,
-            cfg["framework"][
-                "catalog"
-            ],
-        )
-
-    except Exception as exc:
-
-        print(
-            f"ML weighting failed "
-            f"(non-fatal): {exc}"
-        )
-
-    # ========================================================
-    # STEP 3
-    # KPI STAGE B
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print(
-        "STEP 3 - KPI DYNAMIC WEIGHTS"
-    )
-    print("=" * 70)
-
-    try:
-
-        compute_kpi_weights(
-            spark,
-            cfg,
-        )
-
-    except Exception as exc:
-
-        print(
-            f"KPI weighting failed "
-            f"(non-fatal): {exc}"
-        )
-
-    # ========================================================
-    # STEP 4
-    # EFFECTIVE WEIGHTS
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print(
-        "STEP 4 - EFFECTIVE DQ WEIGHTS"
-    )
-    print("=" * 70)
-
-    try:
-
-        effective_weights = (
-            build_effective_weights(
-                spark,
-                cfg,
-            )
-        )
-
-    except Exception as exc:
-
-        print(
-            f"Dynamic weights unavailable: "
-            f"{exc}"
-        )
-
-        effective_weights = {
-            rule["id"]:
-            float(
-                rule.get(
-                    "default_weight",
-                    0,
-                )
-            )
-            for rule in cfg[
-                "dq_rules"
-            ]
-        }
-
-    # ========================================================
-    # STEP 5
-    # DISCOVERY
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print(
-        "STEP 5 - TABLE DISCOVERY"
-    )
-    print("=" * 70)
-
-    tables = discover_source_tables(
-        spark,
-        cfg,
-    )
-
-    if not tables:
-
-        print(
-            "No tables found."
-        )
-
-        spark.stop()
-
-        return
-
-    # ========================================================
-    # STEP 6
-    # PROCESS TABLES
-    # ========================================================
+    # --------------------------------------------------------
+    # PROCESS ALL TABLES
+    # --------------------------------------------------------
 
     summary_rows = []
-
     detail_rows = []
-
     profile_rows = []
-
     candidate_rows = []
 
     successful_tables = 0
-
     failed_tables = 0
 
-    for (
-        catalog,
-        schema,
-        table,
-    ) in tables:
+    for catalog, schema, table in tables:
 
         try:
 
@@ -867,7 +628,6 @@ def main():
                 catalog,
                 schema,
                 table,
-                effective_weights,
             )
 
             if (
@@ -876,7 +636,6 @@ def main():
             ):
 
                 failed_tables += 1
-
                 continue
 
             (
@@ -887,21 +646,11 @@ def main():
             ) = result
 
             if summary:
-                summary_rows.append(
-                    summary
-                )
+                summary_rows.append(summary)
 
-            detail_rows.extend(
-                details
-            )
-
-            profile_rows.extend(
-                profiles
-            )
-
-            candidate_rows.extend(
-                candidates
-            )
+            detail_rows.extend(details)
+            profile_rows.extend(profiles)
+            candidate_rows.extend(candidates)
 
             successful_tables += 1
 
@@ -919,15 +668,13 @@ def main():
                 f"Reason: {exc}"
             )
 
-    # ========================================================
-    # WRITE AUDIT
-    # ========================================================
+    # --------------------------------------------------------
+    # WRITE AUDIT RESULTS
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print(
-        "WRITING AUDIT RESULTS"
-    )
+    print("WRITING AUDIT RESULTS")
     print("=" * 70)
 
     try:
@@ -941,29 +688,27 @@ def main():
         )
 
         print(
-            "Audit results written."
+            "Audit results written successfully."
         )
 
     except Exception as exc:
 
         print(
-            f"Audit write failed: "
-            f"{exc}"
+            f"Audit write failed: {exc}"
         )
 
-    # ========================================================
-    # WRITE CANDIDATES
-    # ========================================================
+    # --------------------------------------------------------
+    # WRITE RULE CANDIDATES
+    # --------------------------------------------------------
 
     if candidate_rows:
 
         try:
 
-            candidate_schema = cfg[
-                "framework"
-            ][
-                "candidate_schema"
-            ]
+            candidate_schema = (
+                cfg["framework"]
+                ["candidate_schema"]
+            )
 
             candidate_table = (
                 cfg["output_tables"]
@@ -994,25 +739,70 @@ def main():
                 )
 
                 print(
-                    "Rule candidates written."
+                    "Rule candidates "
+                    "written successfully."
                 )
 
         except Exception as exc:
 
             print(
-                f"Candidate write failed: "
-                f"{exc}"
+                f"Candidate write failed: {exc}"
             )
 
-    # ========================================================
-    # FLAT KPI REPORT
-    # ========================================================
+    # --------------------------------------------------------
+    # ML DYNAMIC WEIGHTING
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print(
-        "INCIDENT-LEVEL KPI REPORT"
-    )
+    print("ML DYNAMIC WEIGHTING")
+    print("=" * 70)
+
+    try:
+
+        train_dynamic_weights(
+            spark,
+            cfg,
+            cfg["framework"]["catalog"],
+        )
+
+    except Exception as exc:
+
+        print(
+            f"ML weighting step "
+            f"failed (non-fatal): {exc}"
+        )
+
+    # --------------------------------------------------------
+    # KPI DYNAMIC WEIGHTS
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("KPI DYNAMIC WEIGHTS")
+    print("=" * 70)
+
+    try:
+
+        compute_kpi_weights(
+            spark,
+            cfg,
+        )
+
+    except Exception as exc:
+
+        print(
+            f"KPI weighting step "
+            f"failed (non-fatal): {exc}"
+        )
+
+    # --------------------------------------------------------
+    # INCIDENT LEVEL KPI REPORT
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("INCIDENT-LEVEL KPI REPORT")
     print("=" * 70)
 
     try:
@@ -1025,19 +815,40 @@ def main():
     except Exception as exc:
 
         print(
-            f"KPI incident report failed: "
-            f"{exc}"
+            f"Incident-level KPI report "
+            f"failed (non-fatal): {exc}"
         )
 
-    # ========================================================
-    # RE-INGESTION
-    # ========================================================
+    # --------------------------------------------------------
+    # EFFECTIVE WEIGHTS
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print(
-        "RE-INGESTION"
-    )
+    print("EFFECTIVE WEIGHT RESOLUTION")
+    print("=" * 70)
+
+    try:
+
+        build_effective_weights(
+            spark,
+            cfg,
+        )
+
+    except Exception as exc:
+
+        print(
+            f"Weight resolver preview "
+            f"failed (non-fatal): {exc}"
+        )
+
+    # --------------------------------------------------------
+    # RE-INGESTION
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("RE-INGESTION")
     print("=" * 70)
 
     try:
@@ -1051,19 +862,17 @@ def main():
     except Exception as exc:
 
         print(
-            f"Re-ingestion failed: "
-            f"{exc}"
+            f"Re-ingestion step "
+            f"failed (non-fatal): {exc}"
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # FINAL REPORT
-    # ========================================================
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print(
-        "FINAL REPORT"
-    )
+    print("FINAL DATA QUALITY REPORT")
     print("=" * 70)
 
     try:
@@ -1076,19 +885,16 @@ def main():
     except Exception as exc:
 
         print(
-            f"Final report failed: "
-            f"{exc}"
+            f"Final report failed: {exc}"
         )
 
-    # ========================================================
-    # SUMMARY
-    # ========================================================
+    # --------------------------------------------------------
+    # PIPELINE SUMMARY
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print(
-        "PIPELINE EXECUTION SUMMARY"
-    )
+    print("PIPELINE EXECUTION SUMMARY")
     print("=" * 70)
 
     print(
@@ -1138,13 +944,16 @@ def main():
     else:
 
         print(
-            "PIPELINE COMPLETED WITH TABLE ERRORS"
+            "PIPELINE COMPLETED "
+            "WITH TABLE ERRORS"
         )
 
     print("=" * 70)
 
-    spark.stop()
 
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
