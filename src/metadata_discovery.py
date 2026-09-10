@@ -396,3 +396,97 @@ def discover_source_tables(
     )
 
     return result
+
+# ============================================================
+# ADD THESE FUNCTIONS TO src/metadata_discovery.py
+# (append - do not remove discover_catalogs, discover_schemas,
+#  discover_tables, discover_all_metadata, get_table_columns,
+#  get_table_dataframe, or discover_source_tables - all still used)
+#
+# These build on the SAME discover_catalogs/discover_schemas/
+# discover_tables primitives discover_source_tables already used
+# successfully (proven by real "Source tables discovered" output
+# across many runs) - this just widens the loop from one
+# configured catalog to every catalog Unity Catalog exposes.
+# ============================================================
+
+def discover_all_catalogs(spark, cfg):
+    """
+    Returns every catalog Unity Catalog exposes, minus whatever is
+    listed in framework.excluded_catalogs (system catalogs like
+    'system', 'samples', 'hive_metastore' should go there - they
+    are NOT source data and should never be profiled/DQ-checked).
+    """
+    framework = cfg["framework"]
+    excluded_catalogs = set(framework.get("excluded_catalogs", []))
+
+    rows = spark.sql("SHOW CATALOGS").collect()
+    catalog_col = "catalog" if "catalog" in rows[0].asDict() else rows[0].asDict().keys().__iter__().__next__()
+    all_catalogs = [r[catalog_col] for r in rows]
+
+    included = framework.get("included_catalogs")
+    if included:
+        catalogs = [c for c in all_catalogs if c in included]
+    else:
+        catalogs = [c for c in all_catalogs if c not in excluded_catalogs]
+
+    print(f"Catalogs discovered: {catalogs} (excluded: {sorted(excluded_catalogs)})")
+    return catalogs
+
+
+def discover_source_tables_all_catalogs(spark, cfg):
+    """
+    The multi-catalog replacement for discover_source_tables.
+    Walks every catalog (per discover_all_catalogs) -> every schema
+    in it (excluding information_schema and framework's own
+    dqx_* schemas, same as before) -> every table in each schema.
+
+    Returns a flat list of (catalog, schema, table) tuples - same
+    shape main.py's `for catalog, schema, table in tables:` loop
+    already expects, so main.py's loop body doesn't need to change.
+
+    NOTE: framework.source_schema_allowlist, if set, is still
+    honored WITHIN each catalog - e.g. if it's ['demo'], only the
+    'demo' schema is scanned in every discovered catalog, not just
+    in the framework.catalog one. Leave it empty/unset to scan
+    every non-excluded schema in every catalog.
+    """
+    framework = cfg["framework"]
+    excluded_schemas = framework.get("excluded_schemas", [])
+    allowlist = framework.get("source_schema_allowlist")
+
+    catalogs = discover_all_catalogs(spark, cfg)
+    result = []
+
+    for catalog in catalogs:
+        schemas = discover_schemas(spark, catalog, excluded_schemas)
+        if allowlist:
+            schemas = [s for s in schemas if s in allowlist]
+
+        for schema in schemas:
+            for table in discover_tables(spark, catalog, schema):
+                result.append((catalog, schema, table))
+
+    print(f"Source tables discovered across {len(catalogs)} catalog(s): {len(result)} total")
+    return result
+
+
+def discover_volumes(spark, catalog, schema):
+    """
+    Lists Unity Catalog Volumes in a schema (file/unstructured
+    storage objects, distinct from tables). Enumeration only -
+    volumes hold files, not rows, so the existing row/column-level
+    DQ checks don't apply to them directly. This is here so the
+    framework at least KNOWS they exist and can log/audit that,
+    not to run DQ01-DQ16 against volume contents (that would need
+    a separate file-level profiling approach - out of scope unless
+    you tell me what "DQ checks on a volume" should mean concretely,
+    e.g. checking every file in it parses, or checking file counts).
+    """
+    try:
+        rows = spark.sql(f"SHOW VOLUMES IN `{catalog}`.`{schema}`").collect()
+        volumes = [r[0] for r in rows]
+    except Exception as exc:
+        print(f"Could not list volumes in {catalog}.{schema}: {exc}")
+        volumes = []
+    return volumes
