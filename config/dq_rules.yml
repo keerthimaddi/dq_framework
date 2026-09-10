@@ -1,12 +1,73 @@
 # ============================================================
 # CAMPAIGN DATA QUALITY FRAMEWORK
-# CONFIGURATION
+# CONFIGURATION - metadata-driven, multi-catalog
+#
+# WHAT CHANGED FROM THE PREVIOUS VERSION:
+#   - table_rules: removed entirely. No table/column names or
+#     table-specific rules live here anymore. Every table now
+#     gets its rules 100% from auto_rules.build_auto_rule()'s
+#     live schema inspection (mandatory columns, key candidates,
+#     range rules, pattern rules - all derived from the actual
+#     data, not hand-written here).
+#   - relationships: removed entirely, for the same reason - it
+#     named specific tables/columns. See "Known limitation" below.
+#   - framework.catalog -> split into two concepts:
+#       control_catalog: where the framework's OWN output lives
+#         (dqx_bronze/silver/gold/audit/quarantine/profiling) -
+#         this is infrastructure, not source data, so it's fine
+#         for it to be one configured location.
+#       included_catalogs / excluded_catalogs: which catalogs to
+#         DISCOVER AND SCAN as source data. Leave included_catalogs
+#         empty to scan every catalog Unity Catalog exposes, minus
+#         excluded_catalogs.
+#
+# KNOWN LIMITATION (read before relying on this in production):
+# Removing table_rules means DQ04/DQ08 no longer benefit from the
+# hand-picked pattern_rules and allowed_values that only a human
+# who knows the business could write (e.g. "record_id must match
+# ^CAMP_[0-9]{4}$", "risk_level must be one of LOW/MEDIUM/HIGH").
+# auto_rules.py's schema-derived rules will still cover
+# completeness/uniqueness/basic ranges/data types automatically,
+# but validation gets measurably looser for anything that depends
+# on business-specific format or vocabulary. This is the direct
+# tradeoff of "fully metadata-driven" - it's not a bug, but you
+# should know DQ03/DQ08/DQ14/DQ15 will catch less on tables that
+# used to have manual rules.
+#
+# Similarly, removing relationships: means DQ06 (Integrity,
+# cross-table) has no configured foreign-key pairs to check
+# unless auto_rules.py can discover real FK constraints declared
+# natively in Unity Catalog (information_schema.key_column_usage /
+# referential_constraints) - I can't confirm whether it does this
+# without seeing auto_rules.py's source. If it doesn't, DQ06 will
+# effectively no-op across all tables until that's added.
 # ============================================================
 
 framework:
   name: Campaign Data Quality Framework
-  catalog: wmg
 
+  # Where the framework's OWN tables live (Bronze/Silver/Gold/
+  # audit/quarantine/profiling). This is infrastructure, not
+  # source data - one location for it is intentional, not a
+  # violation of "don't hardcode source tables".
+  control_catalog: wmg
+
+  # Which catalogs to DISCOVER AND SCAN as source data.
+  # Leave empty ([]) to scan every catalog Unity Catalog exposes
+  # (minus excluded_catalogs). Set explicit names here only if you
+  # want to restrict discovery to specific catalogs.
+  included_catalogs: []
+
+  # System/infrastructure catalogs that should never be treated as
+  # source data, regardless of included_catalogs.
+  excluded_catalogs:
+    - system
+    - samples
+    - hive_metastore
+
+  # information_schema is a schema WITHIN every catalog, not a
+  # catalog itself - excluded here, applied inside every catalog
+  # during schema discovery.
   excluded_schemas:
     - information_schema
     - dqx_bronze
@@ -23,6 +84,11 @@ framework:
   quarantine_schema: dqx_quarantine
   candidate_schema: dqx_profiling
 
+  # Optional: restrict discovery to specific schema names WITHIN
+  # every scanned catalog. Leave empty to scan every non-excluded
+  # schema in every catalog. Currently scoped to 'demo' to match
+  # your existing environment - widen or empty this out once
+  # you're ready to discover beyond it.
   source_schema_allowlist:
     - demo
 
@@ -30,19 +96,11 @@ framework:
   volume_default_variance_pct: 30
 
 
-# ============================================================
-# OVERALL SCORE THRESHOLDS
-# ============================================================
-
 overall_thresholds:
   pass: 90
   warning: 75
   fail: 0
 
-
-# ============================================================
-# QUALITY GATE
-# ============================================================
 
 quality_gate:
   enabled: true
@@ -50,8 +108,9 @@ quality_gate:
 
 
 # ============================================================
-# DQ RULES
-# Total default weight = 100
+# DQ RULES - generic dimension definitions only.
+# No table names, no column names, no table-specific logic.
+# Total default weight = 100.
 # ============================================================
 
 dq_rules:
@@ -170,492 +229,26 @@ dq_rules:
 
 
 # ============================================================
-# TABLE RULES
+# table_rules intentionally removed.
+# Every table's rules now come 100% from auto_rules.build_auto_rule()
+# inspecting the table's live schema at run time. If you need to
+# hand-tune a specific table again later, this is where a manual
+# override block would go back in - but per this request, none
+# are hardcoded here anymore.
 # ============================================================
 
-table_rules:
-
-  # ----------------------------------------------------------
-  # CAMPAIGN DATA
-  # ----------------------------------------------------------
-
-  wmg.demo.campaign_data:
-
-    unique_keys:
-      - record_id
-
-    mandatory_columns:
-      - record_id
-      - campaign_name
-      - ad_set_name
-      - amount_spent_usd
-      - age_group
-      - creative_type
-      - event_date
-      - incident
-
-    null_columns:
-      - record_id
-      - campaign_name
-      - ad_set_name
-      - amount_spent_usd
-      - age_group
-      - creative_type
-      - event_date
-      - incident
-
-    expected_types:
-      record_id: string
-      campaign_id: string
-      campaign_name: string
-      ad_set_name: string
-      amount_spent_usd: double
-      age_group: string
-      creative_type: string
-      event_date: date
-      incident: string
-      rev_impact: double
-      ds: string
-      label_code: string
-      kpi: string
-      include_count: int
-
-    allowed_values:
-
-      age_group:
-        - 18-24
-        - 25-34
-        - 35-44
-        - 45-54
-        - 55+
-
-      creative_type:
-        - Video
-        - Display
-        - Carousel
-        - Static
-        - HTML5
-
-      ds:
-        - DV360
-        - Meta
-        - Google
-        - TTD
-
-      include_count:
-        - 0
-        - 1
-
-    range_rules:
-
-      amount_spent_usd:
-        min: 0
-
-      rev_impact:
-        min: 0
-
-      include_count:
-        min: 0
-        max: 1
-
-    length_rules:
-
-      campaign_name:
-        min: 3
-        max: 120
-
-      ad_set_name:
-        min: 3
-        max: 120
-
-      incident:
-        max: 200
-
-    pattern_rules:
-
-      record_id: '^CAMP_[0-9]{4}$'
-      campaign_id: '^CMP_[0-9]{3}$'
-      label_code: '^L[0-9]{2}$'
-
-    conformity_rules:
-
-      amount_spent_usd: 'amount_spent_usd >= 0'
-      rev_impact: 'rev_impact >= 0'
-
-    row_expressions:
-
-      spend_non_negative: 'amount_spent_usd >= 0'
-      impact_non_negative: 'rev_impact >= 0'
-
-    consistency_rules:
-
-      include_is_binary: 'include_count IN (0,1)'
-
-    business_rules:
-
-      include_incident_logic: '((include_count = 1) OR (include_count = 0))'
-
-    date_columns:
-      - event_date
-
-
-  # ----------------------------------------------------------
-  # CAMPAIGN MASTER
-  # ----------------------------------------------------------
-
-  wmg.demo.campaign_master:
-
-    unique_keys:
-      - campaign_id
-
-    mandatory_columns:
-      - campaign_id
-      - campaign_name
-
-    null_columns:
-      - campaign_id
-      - campaign_name
-
-    expected_types:
-      campaign_id: string
-      campaign_name: string
-
-    pattern_rules:
-      campaign_id: '^CMP_[0-9]{3}$'
-
-    length_rules:
-      campaign_name:
-        min: 3
-        max: 120
-
-    allowed_values: {}
-    range_rules: {}
-    conformity_rules: {}
-    row_expressions: {}
-    consistency_rules: {}
-    business_rules: {}
-    date_columns: []
-
-
-  # ----------------------------------------------------------
-  # INCIDENT HISTORY
-  # ----------------------------------------------------------
-
-  wmg.demo.incident_history:
-
-    unique_keys: []
-
-    mandatory_columns:
-      - incident_count
-      - avg_mttd_minutes
-      - avg_mtta_minutes
-      - avg_mttr_minutes
-      - aidr_pct
-      - severity_score
-      - total_rev_impact
-
-    null_columns:
-      - incident_count
-      - avg_mttd_minutes
-      - avg_mtta_minutes
-      - avg_mttr_minutes
-      - aidr_pct
-      - severity_score
-      - total_rev_impact
-
-    expected_types:
-      incident_count: int
-      avg_mttd_minutes: double
-      avg_mtta_minutes: double
-      avg_mttr_minutes: double
-      aidr_pct: double
-      severity_score: double
-      total_rev_impact: double
-
-    allowed_values: {}
-    range_rules: {}
-    pattern_rules: {}
-    length_rules: {}
-    conformity_rules: {}
-    row_expressions: {}
-    consistency_rules: {}
-    business_rules: {}
-    date_columns: []
-
-
-  # ----------------------------------------------------------
-  # TRANSACTIONS
-  # ----------------------------------------------------------
-
-  wmg.demo.transactions:
-
-    unique_keys:
-      - transaction_id
-
-    mandatory_columns:
-      - transaction_id
-      - customer_id
-      - transaction_date
-      - amount
-      - transaction_type
-      - currency
-      - transaction_status
-      - order_id
-      - region
-      - risk_level
-
-    null_columns:
-      - transaction_id
-      - customer_id
-      - transaction_date
-      - amount
-      - transaction_type
-      - currency
-      - transaction_status
-      - order_id
-
-    expected_types:
-      transaction_id: string
-      customer_id: string
-      transaction_date: string
-      amount: double
-      transaction_type: string
-      currency: string
-      source: string
-      channel: string
-      transaction_status: string
-      order_id: string
-      region: string
-      risk_level: string
-
-    allowed_values:
-
-      transaction_status:
-        - SUCCESS
-        - FAILED
-        - PENDING
-        - CANCELLED
-
-      risk_level:
-        - LOW
-        - MEDIUM
-        - HIGH
-
-    range_rules:
-
-      amount:
-        min: 0
-
-    length_rules:
-
-      transaction_id:
-        min: 1
-        max: 100
-
-      customer_id:
-        min: 1
-        max: 100
-
-      order_id:
-        min: 1
-        max: 100
-
-    pattern_rules: {}
-
-    conformity_rules:
-
-      amount_non_negative: "amount >= 0"
-
-    row_expressions:
-
-      amount_non_negative: "amount >= 0"
-
-    consistency_rules: {}
-    business_rules: {}
-
-    date_columns:
-      - transaction_date
-
-
-  # ----------------------------------------------------------
-  # EMEA / GLOBAL DATA
-  # ----------------------------------------------------------
-
-  wmg.demo.emea_and_global_data_combined_2_1:
-
-    unique_keys: []
-
-    mandatory_columns:
-      - Campaign name
-      - Ad set name
-      - Ad name
-      - Day
-      - Delivery status
-      - Delivery level
-      - Amount spent (USD)
-      - Impressions
-      - Platform
-      - Region
-      - Market
-
-    null_columns:
-      - Campaign name
-      - Ad set name
-      - Ad name
-      - Day
-      - Amount spent (USD)
-      - Impressions
-      - Platform
-      - Region
-      - Market
-
-    expected_types:
-
-      Campaign name: string
-      Ad set name: string
-      Ad name: string
-      Day: date
-      Delivery status: string
-      Delivery level: string
-      Attribution setting: string
-      Result type: string
-      Results: bigint
-      Reach: bigint
-      Frequency: double
-      Cost per result: double
-      Amount spent (USD): double
-      Quality ranking: string
-      Engagement rate ranking: string
-      Conversion rate ranking: string
-      Impressions: bigint
-      CPM: double
-      Link clicks: bigint
-      Shop clicks: bigint
-      CPC: double
-      CTR: double
-      Landing page views: bigint
-      Cost per landing page view: double
-      Post engagements: bigint
-      Cost per Page engagement: double
-      Campaign Budget: double
-      Campaign Budget Type: string
-      Ad Set Budget: string
-      Ad Set Budget Type: string
-      Post reactions: bigint
-      Post shares: bigint
-      Post comments: bigint
-      Post saves: bigint
-      Cost per post engagement: double
-      ThruPlays: bigint
-      Platform: string
-      Region: string
-      Market: string
-      Artist: string
-      ACID: string
-      Audience Type: string
-      Optimization: string
-      Age Group: string
-      Placement: string
-      Campaign: string
-      Creative_Type: string
-
-    allowed_values: {}
-
-    range_rules:
-
-      Results:
-        min: 0
-
-      Reach:
-        min: 0
-
-      Frequency:
-        min: 0
-
-      Amount spent (USD):
-        min: 0
-
-      Impressions:
-        min: 0
-
-      Link clicks:
-        min: 0
-
-      Shop clicks:
-        min: 0
-
-      CTR:
-        min: 0
-
-      Post engagements:
-        min: 0
-
-      Post reactions:
-        min: 0
-
-      Post shares:
-        min: 0
-
-      Post comments:
-        min: 0
-
-      Post saves:
-        min: 0
-
-      ThruPlays:
-        min: 0
-
-    length_rules:
-
-      Campaign name:
-        min: 1
-        max: 500
-
-      Ad set name:
-        min: 1
-        max: 500
-
-      Ad name:
-        min: 1
-        max: 500
-
-    pattern_rules: {}
-
-    conformity_rules:
-
-      spend_non_negative: "`Amount spent (USD)` >= 0"
-
-    row_expressions:
-
-      spend_non_negative: "`Amount spent (USD)` >= 0"
-
-    consistency_rules: {}
-    business_rules: {}
-
-    date_columns:
-      - Day
+table_rules: {}
 
 
 # ============================================================
-# TABLE RELATIONSHIPS
+# relationships intentionally removed - see "Known limitation"
+# in the header comment above.
 # ============================================================
 
-relationships:
+relationships: []
 
-  - name: campaign_master_fk
-    child_table: wmg.demo.campaign_data
-    child_column: campaign_id
-    parent_table: wmg.demo.campaign_master
-    parent_column: campaign_id
-    nullable_allowed: false
-
-
-# ============================================================
-# PROFILING
-# ============================================================
 
 profiling:
-
   enabled: true
   top_values: 10
   candidate_null_rate_pct: 1
@@ -663,23 +256,32 @@ profiling:
 
 # ============================================================
 # KPI METRICS
+# label_kpi_map is NOT table/column hardcoding - it's a business
+# taxonomy (incident label -> DQ dimension), inherent to
+# Requirement 02 and independent of any specific catalog/schema/
+# table. This has to stay hand-defined; there's no metadata to
+# auto-discover an incident's business meaning from.
 # ============================================================
 
 kpi_metrics:
 
   enabled: true
 
-  incident_log_table: wmg.dqx_audit.dq_incident_log
-
-  incident_report_table: wmg.dqx_audit.dq_kpi_incident_report
+  # Framework-owned tables. Given as schema + table name only -
+  # kpi_metrics.py builds the full path by prefixing
+  # framework.control_catalog at runtime, so the catalog literal
+  # exists in exactly ONE place (framework.control_catalog above),
+  # not repeated in every table reference.
+  incident_log_schema: dqx_audit
+  incident_log_table_name: dq_incident_log
+  incident_report_schema: dqx_audit
+  incident_report_table_name: dq_kpi_incident_report
 
   severity_weights:
-
     duration_weight: 0.5
     revenue_weight: 0.5
 
   label_kpi_map:
-
     "Null Primary Keys":
       kpi: DQ01
       kpi_name: Completeness
@@ -731,44 +333,33 @@ kpi_metrics:
       dimension: timeliness
 
   default_kpi:
-
     kpi: OPS99
     kpi_name: Unclassified
     dimension: unclassified
 
 
-# ============================================================
-# ML DYNAMIC WEIGHTING
-# ============================================================
-
 ml_weighting:
-
   enabled: true
-
-  incident_table: wmg.demo.incident_history
-
+  # incident_history lives in a SOURCE schema (part of
+  # source_schema_allowlist) rather than an audit schema,
+  # deliberately - this is what lets it be discovered and
+  # DQ-checked by the normal per-table loop like any other table.
+  incident_schema: demo
+  incident_table_name: incident_history
   feature_columns:
-
     - incident_count
     - avg_mttd_minutes
     - avg_mtta_minutes
     - avg_mttr_minutes
     - aidr_pct
     - severity_score
-
   target_column: total_rev_impact
-
-  output_table: wmg.dqx_audit.dq_dynamic_weights
-
+  output_schema: dqx_audit
+  output_table_name: dq_dynamic_weights
   min_training_rows: 10
 
 
-# ============================================================
-# OUTPUT TABLES
-# ============================================================
-
 output_tables:
-
   audit: dq_audit_results
   summary: dq_summary
   quarantine: dq_quarantine

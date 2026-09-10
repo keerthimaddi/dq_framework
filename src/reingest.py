@@ -1,19 +1,3 @@
-# ============================================================
-# RE-INGESTION MODULE
-# Requirement 01 Section 17: Quarantine -> Correction -> Re-validation -> Silver
-#
-# DELIBERATELY PRACTICAL, NOT A DATA REPAIR ENGINE:
-# a data steward supplies corrected rows in a per-table
-# "dq_corrections_<schema>_<table>" Delta table (same schema as
-# the source table + a correction_status column). This module
-# re-validates ONLY those rows using the EXACT SAME rule-merging
-# and failure-condition logic already used in the main pipeline
-# (build_auto_rule + merge_rules + build_failure_condition) - so
-# there is no second, divergent validation framework. Rows that
-# now pass get merged into Silver; rows that still fail are left
-# for the steward to correct again.
-# ============================================================
-
 from pyspark.sql import functions as F
 
 from src.quarantine_rules import build_failure_condition
@@ -22,16 +6,18 @@ from src.auto_rules import build_auto_rule, merge_rules
 
 
 def _correction_table_name(cfg, catalog, schema, table):
+    # Correction/audit tables are always centralized in
+    # control_catalog, regardless of which catalog the SOURCE
+    # table lives in - this keeps all steward-facing correction
+    # tables in one predictable place across a multi-catalog
+    # discovery run, instead of scattering dq_corrections_* tables
+    # across every catalog that happens to have a failing table.
+    control_catalog = cfg["framework"]["control_catalog"]
     audit_schema = cfg["framework"]["audit_schema"]
-    return f"{catalog}.{audit_schema}.dq_corrections_{schema}_{table}"
+    return f"{control_catalog}.{audit_schema}.dq_corrections_{catalog}_{schema}_{table}"
 
 
 def get_pending_corrections(spark, cfg, catalog, schema, table):
-    """
-    Returns only PENDING correction rows for this table, or None if
-    no correction table exists for it (the common case - most tables
-    will never have one, and that's fine, this is a no-op then).
-    """
     correction_table = _correction_table_name(cfg, catalog, schema, table)
     if not spark.catalog.tableExists(correction_table):
         return None
@@ -45,13 +31,6 @@ def get_pending_corrections(spark, cfg, catalog, schema, table):
 
 
 def revalidate_corrections(spark, corrections_df, cfg, catalog, schema, table):
-    """
-    Re-applies the SAME effective_rule (auto-derived + manual YAML
-    override, merged exactly as process_table does it) and the SAME
-    build_failure_condition used for the original quarantine. This
-    is literally the same DQ logic the rows were quarantined against
-    - not a reimplementation.
-    """
     auto_rule = build_auto_rule(spark, corrections_df, catalog, schema, table, cfg)
     manual_rule = get_table_rule(cfg, catalog, schema, table)
     effective_rule = merge_rules(auto_rule, manual_rule)
@@ -65,12 +44,9 @@ def revalidate_corrections(spark, corrections_df, cfg, catalog, schema, table):
 
 
 def promote_to_silver(spark, now_passing_df, cfg, catalog, schema, table):
-    """
-    Merges corrected+passing rows into the existing Silver table.
-    Uses unique_keys from table_rules to merge safely; falls back
-    to append if no unique_keys are configured for this table
-    (best-effort - configure unique_keys to avoid duplicate risk).
-    """
+    # Silver/Gold stay namespaced by SOURCE catalog+schema, since
+    # this is where the corrected data actually belongs, unlike
+    # the audit/correction bookkeeping tables above.
     if now_passing_df.rdd.isEmpty():
         return 0
 
@@ -111,13 +87,6 @@ def promote_to_silver(spark, now_passing_df, cfg, catalog, schema, table):
 
 
 def run_reingestion(spark, cfg, tables):
-    """
-    Called once per pipeline run, after the main table loop. Safe
-    no-op for every table with no correction table present - this
-    only does work where a steward has actually supplied corrections.
-    Never raises out of the pipeline; every table is isolated in
-    its own try/except.
-    """
     print()
     print("=" * 70)
     print("RE-INGESTION")
